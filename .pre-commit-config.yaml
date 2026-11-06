@@ -1,0 +1,87 @@
+# Quality gate of the eD2k client PoC:
+#   uv run pre-commit install --install-hooks --config PoCs/ed2k-client/.pre-commit-config.yaml
+#   uv run pre-commit run --all-files --config PoCs/ed2k-client/.pre-commit-config.yaml
+#
+# pre-commit resolves hooks from the root of the git repository, and this PoC is one directory inside a larger
+# one. Every hook is therefore scoped with `files:` so it never touches a neighbouring project, and every local
+# hook enters this directory first, because uv, ruff, the type checkers and pytest read their configuration from
+# the working directory. The unit tests run here; the integration tests (`-m integration`) and the live network
+# tests (`-m network`) run by hand, the latter only on a host that may reach the eD2k network.
+
+default_install_hook_types:
+  - pre-commit
+
+files: ^PoCs/ed2k-client/
+
+repos:
+  # Standard checks and fixers
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: double-quote-string-fixer
+      - id: end-of-file-fixer
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  - repo: https://github.com/MarcoGorelli/absolufy-imports
+    rev: 1683a63d850e065495c05b771e4a20db010a58e7  # frozen: v0.3.1
+    hooks:
+      - id: absolufy-imports
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: 75992aaa40730136014f34227e0135f63fc951b4  # frozen: v3.21.2
+    hooks:
+      - id: pyupgrade
+        args: [--py314-plus]
+
+  - repo: https://github.com/MarcoGorelli/auto-walrus
+    rev: 1743edbed52f3d61886b59d98a27164a8af29c0d  # frozen: 0.4.1
+    hooks:
+      - id: auto-walrus
+        args: [--line-length=120]
+
+  # Ruff, the type checkers and the unit tests through uv, so pyproject.toml is the only version of each tool
+  - repo: local
+    hooks:
+      - id: ruff-imports
+        name: ruff check imports
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --select=I --fix src tests'
+        language: system
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff format --force-exclude src tests'
+        language: system
+        pass_filenames: false
+      - id: ruff-check
+        name: ruff check
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --fix src tests'
+        language: system
+        pass_filenames: false
+      - id: ty
+        name: ty type check
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ty check .'
+        language: system
+        pass_filenames: false
+      - id: mypy
+        name: mypy type check
+        entry: bash -c 'cd PoCs/ed2k-client && uv run mypy src'
+        language: system
+        pass_filenames: false
+      - id: pyrefly
+        name: pyrefly type check
+        entry: bash -c 'cd PoCs/ed2k-client && uv run pyrefly check'
+        language: system
+        pass_filenames: false
+      - id: pytest
+        name: pytest unit tests
+        entry: bash -c 'cd PoCs/ed2k-client && uv run pytest -q'
+        language: system
+        pass_filenames: false

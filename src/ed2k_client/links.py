@@ -1,0 +1,130 @@
+"""Parse and build ``ed2k://`` links for files and servers.
+
+A file link is ``ed2k://|file|<name>|<size>|<hash>|[h=<aich>|][p=<parts>|]/`` with a percent-encoded name, as in
+``ED2KLink.cpp`` of aMule. Optional fields after the hash are kept only when they are the AICH root, other fields
+are ignored.
+"""
+
+import ipaddress
+from dataclasses import dataclass
+from typing import Self, override
+from urllib.parse import quote, unquote
+
+from ed2k_client.constants import MAX_FILE_SIZE
+from ed2k_client.errors import ProtocolError
+from ed2k_client.hashing import Ed2kHash
+
+SCHEME: str = 'ed2k://'
+FILE_FIELDS: int = 4
+SERVER_FIELDS: int = 3
+AICH_PREFIX: str = 'h='
+MAX_PORT: int = 65_535
+
+
+@dataclass(frozen=True, slots=True)
+class FileLink:
+    """A link to a file.
+
+    :ivar name: the suggested file name, untrusted.
+    :ivar size: the file size in bytes.
+    :ivar file_hash: the eD2k hash.
+    :ivar aich_root: the AICH root hash in base32, when the link carries one.
+    """
+
+    name: str
+    size: int
+    file_hash: Ed2kHash
+    aich_root: str | None = None
+
+    @classmethod
+    def parse(cls, link: str) -> Self:
+        """Parse a file link.
+
+        :param link: the link text.
+        :type link: str
+        :returns: the link.
+        :rtype: Self
+        :raises ProtocolError: when the text is not a well-formed file link.
+        """
+        fields = _fields(link)
+        if len(fields) < FILE_FIELDS or fields[0] != 'file':
+            err_msg = f'not an ed2k file link: {link!r}'
+            raise ProtocolError(err_msg)
+        name, size_text, hash_text = unquote(fields[1]), fields[2], fields[3]
+        if not size_text.isdigit() or not 0 < int(size_text) <= MAX_FILE_SIZE:
+            err_msg = f'invalid size in link: {size_text!r}'
+            raise ProtocolError(err_msg)
+        aich = next((field.removeprefix(AICH_PREFIX) for field in fields[4:] if field.startswith(AICH_PREFIX)), None)
+        return cls(name=name, size=int(size_text), file_hash=Ed2kHash.from_hex(hash_text), aich_root=aich)
+
+    @override
+    def __str__(self) -> str:
+        """Format the link.
+
+        :returns: the ``ed2k://`` text.
+        :rtype: str
+        """
+        aich = f'{AICH_PREFIX}{self.aich_root}|' if self.aich_root is not None else ''
+        return f'{SCHEME}|file|{quote(self.name, safe="")}|{self.size}|{self.file_hash.hex}|{aich}/'
+
+
+@dataclass(frozen=True, slots=True)
+class ServerLink:
+    """A link to a server.
+
+    :ivar host: the IPv4 address.
+    :ivar port: the TCP port.
+    """
+
+    host: str
+    port: int
+
+    @classmethod
+    def parse(cls, link: str) -> Self:
+        """Parse a server link.
+
+        :param link: the link text.
+        :type link: str
+        :returns: the link.
+        :rtype: Self
+        :raises ProtocolError: when the text is not a well-formed server link.
+        """
+        fields = _fields(link)
+        if len(fields) < SERVER_FIELDS or fields[0] != 'server' or not fields[2].isdigit():
+            err_msg = f'not an ed2k server link: {link!r}'
+            raise ProtocolError(err_msg)
+        try:
+            host = str(ipaddress.IPv4Address(fields[1]))
+        except ValueError as error:
+            err_msg = f'invalid server address: {fields[1]!r}'
+            raise ProtocolError(err_msg) from error
+        port = int(fields[2])
+        if not 0 < port <= MAX_PORT:
+            err_msg = f'invalid server port: {port}'
+            raise ProtocolError(err_msg)
+        return cls(host=host, port=port)
+
+    @override
+    def __str__(self) -> str:
+        """Format the link.
+
+        :returns: the ``ed2k://`` text.
+        :rtype: str
+        """
+        return f'{SCHEME}|server|{self.host}|{self.port}|/'
+
+
+def _fields(link: str) -> list[str]:
+    """Split an ``ed2k://`` link into its fields.
+
+    :param link: the link text.
+    :type link: str
+    :returns: the non-empty fields.
+    :rtype: list[str]
+    :raises ProtocolError: when the text is not an ed2k link.
+    """
+    text = link.strip()
+    if not text.lower().startswith(SCHEME + '|') or not text.endswith('/'):
+        err_msg = f'not an ed2k link: {link!r}'
+        raise ProtocolError(err_msg)
+    return [field for field in text[len(SCHEME) + 1 : -1].split('|') if field]

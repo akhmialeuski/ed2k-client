@@ -1,0 +1,103 @@
+line-length = 120
+indent-width = 4
+target-version = "py314"  # Match pyupgrade --py314-plus; requires-python is the minimum interpreter version
+fix = false # do not fix by default, for CI checks
+
+[format]
+quote-style = "single"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = 120
+
+[lint.flake8-quotes]
+avoid-escape = false
+docstring-quotes = "double"
+inline-quotes = "single"
+
+[lint.flake8-type-checking]
+strict = true
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[lint.pydocstyle]
+convention = "pep257"
+
+[lint]
+preview = true
+fixable = ["ALL"]
+unfixable = []
+select = [
+    "ALL", # Select all rules by default
+]
+ignore = [
+    # Broad category ignores
+    "ERA", # eradicate: commented-out code detection (too noisy)
+    "FIX", # fixme: TODO/FIXME comments (tracked separately)
+    "S", # bandit: security checks (handled by security review, not linter)
+    "TD", # todos: TODO format enforcement (tracked separately)
+    # Formatter compatibility (required when using ruff format)
+    "COM812", # missing-trailing-comma
+    "COM819", # prohibited-trailing-comma
+    "D206", # indent-with-spaces
+    "E111", # indentation-with-invalid-multiple
+    "E114", # indentation-with-invalid-multiple-comment
+    "E117", # over-indented
+    "Q000", # bad-quotes-inline-string
+    "Q001", # bad-quotes-multiline-string
+    "Q002", # bad-quotes-docstring
+    "Q003", # avoidable-escaped-quote
+    # Project-wide policy ignores
+    "D213", # multi-line docstring summary at second line (conflicts with D212)
+    # ruff's pydoclint reads Google and NumPy sections only, so it cannot see the reST fields of the python-coding
+    # standard. Its docstring_fields.py checks :returns: and :rtype: on functions and generators alike.
+    "DOC201", # return not in docstring
+    "DOC402", # yield not in docstring
+    "DOC403", # extraneous yields section
+    "DOC501", # exception not in docstring
+    "CPY001", # missing copyright header
+    "N818", # exception name Error suffix (too strict)
+    "PLR6301", # method could be function/static (too noisy)
+]
+extend-ignore = [
+    "ANN401", # typing.Any disallowed
+    "D417", # missing argument descriptions in docstring
+    "N815", # mixedCase in class scope
+    "RUF002", # ambiguous character in docstring
+]
+exclude = [
+    "*.pyi", ".bzr", ".direnv", ".eggs", ".git", ".hg",
+    ".mypy_cache", ".nox", ".pants.d", ".pytest_cache",
+    ".ruff_cache", ".svn", ".tox", ".venv", "__pypackages__",
+    "_build", "buck-out", "build", "dist", "node_modules", "venv",
+]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.mccabe]
+max-complexity = 8 # at full coverage CRAP equals complexity, so 8 is what a CRAP 8 gate allows
+
+[lint.per-file-ignores]
+"__init__.py" = [
+    "E402", # import violations
+    "F401", # unused imports
+]
+"tests/**" = [
+    "ARG005", # unused lambda argument
+    "FBT001", # pytest passes parametrized booleans positionally
+    "D104", # missing docstring in public package
+    "E501", # line too long
+    "PLC1901", # compare to empty string
+    "PLC2801", # unnecessary encode
+    "PLR2004", # magic value in comparison
+    "PT019", # fixture without value
+    "RET504", # unnecessary assignment before return
+    "SLF001", # private member access
+    "T201", # tests use print
+]
+"**/cli.py" = [
+    "T201", # CLI output uses print
+]
+"scripts/**" = [
+    "INP001", # scripts are run by path and are intentionally not a package
+    "T201", # scripts report to the terminal with print
+]

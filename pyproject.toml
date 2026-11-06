@@ -1,0 +1,83 @@
+[project]
+name = "ed2k-client"
+version = "0.1.0"
+description = "Python client for the eDonkey2000 (eD2k) and Kad networks: connect, search, download and share."
+readme = "README.md"
+requires-python = ">=3.14"
+# Versions read from PyPI on 2026-11-06. Tools are pinned with ==, libraries take a >= floor,
+# and uv.lock fixes what gets installed.
+dependencies = [
+    # Runtime dependencies (>= floor): MD4 and RC4, which OpenSSL 3 no longer offers through hashlib
+    "pycryptodome>=3.20.0",
+    # Dev / test dependencies
+    "pre-commit==4.7.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+    "pyfakefs>=6.0.0",
+    # UV build backend
+    "uv_build==0.13.7",
+    # Linters and type checkers
+    "mypy==2.4.1",
+    "pyrefly==1.4.1",
+    "ruff==0.17.4",
+    "ty==0.0.99",
+]
+
+[project.scripts]
+ed2k-client = "ed2k_client.cli:main"
+
+[tool.uv]
+link-mode = "copy"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: runs real collaborators in the process over loopback sockets and a temporary directory",
+    "network: talks to the live eD2k network and runs only on a host that may reach it",
+]
+addopts = "-m 'not integration and not network'"
+
+# Type-checker configuration
+[tool.mypy]
+ignore_missing_imports = true
+strict = true
+
+[tool.pyrefly]
+project-excludes = [
+    "tests",
+]
+
+[tool.ty.rules]
+# TY rules at https://docs.astral.sh/ty/reference/rules/
+deprecated = "error"
+all = "error"
+ambiguous-protocol-member = "error"
+division-by-zero = "error"
+ignore-comment-unknown-rule = "error"
+invalid-ignore-comment = "error"
+possibly-missing-attribute = "error"
+possibly-missing-implicit-call = "error"
+possibly-missing-import = "error"
+possibly-unresolved-reference = "error"
+redundant-cast = "error"
+undefined-reveal = "error"
+unresolved-global = "error"
+import-not-found = "error"
+unsupported-base = "error"
+unused-ignore-comment = "error"
+useless-overload-body = "error"
+
+[tool.ty.src]
+include = [
+    "src",
+    "scripts",
+]
+exclude = [
+    "tests",
+]

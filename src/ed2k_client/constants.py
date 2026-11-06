@@ -1,0 +1,243 @@
+"""Protocol constants of eD2k and Kad 2, taken from the aMule headers, and the safety limits of this client.
+
+The opcode values come from ``src/include/protocol`` and ``src/include/tags`` of aMule at commit
+6a1105634d81242a581a0f36a7e00379b12a83f3. The limits at the bottom are this client's own: every length that
+arrives from the network is checked against one of them before anything is allocated.
+"""
+
+from enum import IntEnum, IntFlag
+
+
+class Protocol(IntEnum):
+    """First byte of every packet, which selects the opcode namespace."""
+
+    EDONKEY = 0xE3
+    EMULE = 0xC5
+    PACKED = 0xD4
+    KAD = 0xE4
+    KAD_PACKED = 0xE5
+
+
+class ServerOp(IntEnum):
+    """Opcodes of the client to server TCP session."""
+
+    LOGINREQUEST = 0x01
+    REJECT = 0x05
+    GETSERVERLIST = 0x14
+    OFFERFILES = 0x15
+    SEARCHREQUEST = 0x16
+    DISCONNECT = 0x18
+    GETSOURCES = 0x19
+    CALLBACKREQUEST = 0x1C
+    QUERY_MORE_RESULT = 0x21
+    GETSOURCES_OBFU = 0x23
+    SERVERLIST = 0x32
+    SEARCHRESULT = 0x33
+    SERVERSTATUS = 0x34
+    CALLBACKREQUESTED = 0x35
+    CALLBACK_FAIL = 0x36
+    SERVERMESSAGE = 0x38
+    IDCHANGE = 0x40
+    SERVERIDENT = 0x41
+    FOUNDSOURCES = 0x42
+    USERS_LIST = 0x43
+    FOUNDSOURCES_OBFU = 0x44
+
+
+class PeerOp(IntEnum):
+    """Opcodes of the client to client TCP session in the original eDonkey namespace."""
+
+    HELLO = 0x01
+    SENDINGPART = 0x46
+    REQUESTPARTS = 0x47
+    FILEREQANSNOFIL = 0x48
+    END_OF_DOWNLOAD = 0x49
+    ASKSHAREDFILES = 0x4A
+    HELLOANSWER = 0x4C
+    MESSAGE = 0x4E
+    SETREQFILEID = 0x4F
+    FILESTATUS = 0x50
+    HASHSETREQUEST = 0x51
+    HASHSETANSWER = 0x52
+    STARTUPLOADREQ = 0x54
+    ACCEPTUPLOADREQ = 0x55
+    CANCELTRANSFER = 0x56
+    OUTOFPARTREQS = 0x57
+    REQUESTFILENAME = 0x58
+    REQFILENAMEANSWER = 0x59
+    QUEUERANK = 0x5C
+    ASKSHAREDDENIEDANS = 0x61
+
+
+class EmuleOp(IntEnum):
+    """Opcodes of the client to client TCP session in the eMule extension namespace."""
+
+    EMULEINFO = 0x01
+    EMULEINFOANSWER = 0x02
+    COMPRESSEDPART = 0x40
+    QUEUERANKING = 0x60
+    REQUESTSOURCES2 = 0x83
+    ANSWERSOURCES2 = 0x84
+    MULTIPACKET = 0x92
+    MULTIPACKETANSWER = 0x93
+    COMPRESSEDPART_I64 = 0xA1
+    SENDINGPART_I64 = 0xA2
+    REQUESTPARTS_I64 = 0xA3
+
+
+class KadOp(IntEnum):
+    """Opcodes of Kad 2 over UDP."""
+
+    BOOTSTRAP_REQ = 0x01
+    BOOTSTRAP_RES = 0x09
+    HELLO_REQ = 0x11
+    HELLO_RES = 0x19
+    REQ = 0x21
+    HELLO_RES_ACK = 0x22
+    RES = 0x29
+    SEARCH_KEY_REQ = 0x33
+    SEARCH_SOURCE_REQ = 0x34
+    SEARCH_NOTES_REQ = 0x35
+    SEARCH_RES = 0x3B
+    PUBLISH_KEY_REQ = 0x43
+    PUBLISH_SOURCE_REQ = 0x44
+    PUBLISH_RES = 0x4B
+    PING = 0x60
+    PONG = 0x61
+
+
+class TagType(IntEnum):
+    """Value types of a tag; the short string types STR1 to STR16 follow ``STR1`` consecutively."""
+
+    HASH16 = 0x01
+    STRING = 0x02
+    UINT32 = 0x03
+    FLOAT32 = 0x04
+    BOOL = 0x05
+    BOOLARRAY = 0x06
+    BLOB = 0x07
+    UINT16 = 0x08
+    UINT8 = 0x09
+    BSOB = 0x0A
+    UINT64 = 0x0B
+    STR1 = 0x11
+    STR16 = 0x20
+
+
+class FileTag(IntEnum):
+    """Numeric tag names that describe a file."""
+
+    NAME = 0x01
+    SIZE = 0x02
+    TYPE = 0x03
+    FORMAT = 0x04
+    SOURCES = 0x15
+    COMPLETE_SOURCES = 0x30
+    SIZE_HI = 0x3A
+    MEDIA_LENGTH = 0xD3
+    ENCRYPTION = 0xF3
+    SOURCE_UDP_PORT = 0xFC
+    SOURCE_PORT = 0xFD
+    SOURCE_IP = 0xFE
+    SOURCE_TYPE = 0xFF
+
+
+class ClientTag(IntEnum):
+    """Numeric tag names of the login and hello packets."""
+
+    NAME = 0x01
+    PORT = 0x0F
+    VERSION = 0x11
+    SERVER_FLAGS = 0x20
+    EMULECOMPAT_OPTIONS = 0xEF
+    EMULE_UDPPORTS = 0xF9
+    EMULE_MISCOPTIONS1 = 0xFA
+    EMULE_VERSION = 0xFB
+    EMULE_MISCOPTIONS2 = 0xFE
+
+
+class LoginFlag(IntFlag):
+    """Capabilities a client announces to a server in the login tag ``SERVER_FLAGS``."""
+
+    ZLIB = 0x0001
+    IP_IN_LOGIN = 0x0002
+    AUXPORT = 0x0004
+    NEWTAGS = 0x0008
+    UNICODE = 0x0010
+    LARGEFILES = 0x0100
+    SUPPORTCRYPT = 0x0200
+    REQUESTCRYPT = 0x0400
+    REQUIRECRYPT = 0x0800
+
+
+class ServerTcpFlag(IntFlag):
+    """Capabilities a server reports to a client after the assigned ID in ``IDCHANGE``."""
+
+    COMPRESSION = 0x0001
+    NEWTAGS = 0x0008
+    UNICODE = 0x0010
+    RELATEDSEARCH = 0x0040
+    TYPETAGINTEGER = 0x0080
+    LARGEFILES = 0x0100
+    TCPOBFUSCATION = 0x0400
+
+
+class CryptOption(IntFlag):
+    """Obfuscation settings of a source as a server or Kad reports them."""
+
+    SUPPORTED = 0x01
+    REQUESTED = 0x02
+    REQUIRED = 0x04
+    HAS_USER_HASH = 0x80
+
+
+class SearchOperator(IntEnum):
+    """Comparison operators of a numeric search term."""
+
+    EQUAL = 0
+    GREATER = 1
+    LESS = 2
+    GREATER_EQUAL = 3
+    LESS_EQUAL = 4
+    NOT_EQUAL = 5
+
+
+# File geometry
+PART_SIZE: int = 9_728_000
+BLOCK_SIZE: int = 184_320
+MAX_FILE_SIZE: int = 0x40_0000_0000
+LARGE_FILE_THRESHOLD: int = 0xFFFF_FFFF
+EMPTY_MD4: bytes = bytes.fromhex('31D6CFE0D16AE931B73C59D7E0C089C0')
+HASH_LENGTH: int = 16
+
+# Identity and versions announced to the network
+EDONKEY_VERSION: int = 0x3C
+KADEMLIA_VERSION: int = 0x08
+SOFTWARE_ID: int = 0xFF  # SO_COMPAT_UNK: an eMule-compatible client without an assigned id
+SOFTWARE_VERSION: tuple[int, int, int] = (0, 1, 0)
+USER_HASH_MARKERS: dict[int, int] = {5: 14, 14: 111}
+LOW_ID_LIMIT: int = 0x0100_0000
+
+# Default ports
+DEFAULT_TCP_PORT: int = 4662
+DEFAULT_UDP_PORT: int = 4672
+
+# Safety limits applied to everything that arrives from the network
+MAX_CONTROL_PACKET: int = 512 * 1024
+MAX_DATA_PACKET: int = BLOCK_SIZE + 1024
+MAX_SERVER_PACKET: int = 4 * 1024 * 1024
+MAX_UNPACKED_SIZE: int = 8 * 1024 * 1024
+MAX_TAGS: int = 256
+MAX_STRING_BYTES: int = 64 * 1024
+MAX_SEARCH_RESULTS: int = 1000
+MAX_SOURCES_PER_FILE: int = 500
+MAX_HASHSET_PARTS: int = MAX_FILE_SIZE // PART_SIZE + 2
+MAX_FILENAME_BYTES: int = 200
+MAX_UDP_DATAGRAM: int = 8 * 1024
+
+# Timeouts in seconds
+CONNECT_TIMEOUT: float = 15.0
+READ_TIMEOUT: float = 60.0
+SERVER_LOGIN_TIMEOUT: float = 45.0
+SEARCH_TIMEOUT: float = 30.0
+KAD_RESPONSE_TIMEOUT: float = 4.0
