@@ -25,6 +25,7 @@ KIB: int = 1024
 MIB: int = 1024 * KIB
 MIN_SCAN_CHUNK: int = 4 * KIB
 SECONDS_PER_HOUR: float = 3600.0
+SECONDS_PER_DAY: float = 24 * SECONDS_PER_HOUR
 LIST_SEPARATOR: str = ', '
 
 
@@ -87,6 +88,8 @@ class Limits:
     :ivar server_met_bytes: bytes of a downloaded ``server.met``.
     :ivar nodes_dat_contacts: entries read from a ``nodes.dat``.
     :ivar nodes_dat_bytes: bytes of a ``nodes.dat``.
+    :ivar ip_filter_bytes: bytes of a downloaded IP filter, a ZIP archive or a plain ``ipfilter.dat``.
+    :ivar ip_filter_text_bytes: bytes of the ``ipfilter.dat`` a ZIP archive unpacks to.
     :ivar server_messages: server messages kept for the status.
     :ivar server_message_length: characters kept of one server message.
     :ivar server_result_pages: result pages asked of a server for one search.
@@ -106,6 +109,8 @@ class Limits:
     server_met_bytes: int = 2 * MIB
     nodes_dat_contacts: int = 20_000
     nodes_dat_bytes: int = MIB
+    ip_filter_bytes: int = 8 * MIB
+    ip_filter_text_bytes: int = 64 * MIB
     server_messages: int = 50
     server_message_length: int = 1000
     server_result_pages: int = 3

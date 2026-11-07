@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import fcntl
 import logging
+import time
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,10 +38,11 @@ from ed2k_client.links import FileLink, ServerLink
 from ed2k_client.partfile import PartFile
 from ed2k_client.peer import LocalPeer, PeerConnection
 from ed2k_client.search import FileType, SearchQuery, SearchResult, SearchResults
-from ed2k_client.security import AddressPolicy, IpFilter, sanitize_filename
+from ed2k_client.security import DEFAULT_IP_FILTER_URL, AddressPolicy, IpFilter, sanitize_filename
 from ed2k_client.server import LoginDetails, OfferedFile, ServerSession
 from ed2k_client.servermet import DEFAULT_SERVER_MET_URL, ServerEntry, ServerList, ServerMemory
 from ed2k_client.settings import (
+    SECONDS_PER_DAY,
     IoSettings,
     KadSettings,
     Limits,
@@ -69,6 +71,7 @@ QUARANTINE_DIR: str = '.incoming'
 LOCK_FILE: str = 'client.lock'
 ANY_PORT: int = 0
 SERVER_MET_CACHE: str = 'server.met'
+IP_FILTER_CACHE: str = 'ipfilter.dat'
 DEFAULT_NICKNAME: str = 'ed2k-client'
 SERVERS_KEY: str = 'servers'
 DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({'pdf', 'djvu', 'djv'})
@@ -91,7 +94,10 @@ class ClientConfig:
     :ivar server_sessions: servers the client stays logged in to at the same time, each searched and asked for sources.
     :ivar nodes_dat: a local ``nodes.dat``; ``None`` means the file at ``nodes_dat_url``.
     :ivar nodes_dat_url: HTTPS URL of a ``nodes.dat``.
-    :ivar ip_filter: a local ``ipfilter.dat`` with ranges never to contact.
+    :ivar ip_filter: a local ``ipfilter.dat`` with ranges never to contact; ``None`` means the filter at
+        ``ip_filter_url``.
+    :ivar ip_filter_url: HTTPS URL of the IP filter, a ZIP or a plain ``ipfilter.dat``; empty to use no filter.
+    :ivar ip_filter_refresh: seconds after which the cached IP filter is downloaded again.
     :ivar allow_private_peers: dial loopback and private addresses, for tests on one machine only.
     :ivar download: limits of each download.
     :ivar timeouts: how long the client waits on servers, peers and Kad.
@@ -115,6 +121,8 @@ class ClientConfig:
     nodes_dat: Path | None = None
     nodes_dat_url: str = NODES_DAT_URL
     ip_filter: Path | None = None
+    ip_filter_url: str = DEFAULT_IP_FILTER_URL
+    ip_filter_refresh: float = 7 * SECONDS_PER_DAY
     allow_private_peers: bool = False
     download: DownloadSettings = field(default_factory=DownloadSettings)
     timeouts: Timeouts = field(default_factory=Timeouts)
@@ -127,12 +135,13 @@ class ClientConfig:
     def __post_init__(self) -> None:
         """Check the values that cannot be zero.
 
-        :raises ValueError: when no server session is allowed.
+        :raises ValueError: when no server session is allowed or the IP filter would never be refreshed.
         """
         # Ports here may be 0, which picks a free one, so the check of the settings groups does not apply
-        if self.server_sessions < 1:
-            err_msg = f'ClientConfig.server_sessions must be positive, not {self.server_sessions}'
-            raise ValueError(err_msg)
+        for name, value in (('server_sessions', self.server_sessions), ('ip_filter_refresh', self.ip_filter_refresh)):
+            if value <= 0:
+                err_msg = f'ClientConfig.{name} must be positive, not {value}'
+                raise ValueError(err_msg)
 
     @classmethod
     def from_toml(cls, path: Path, *, base: Self | None = None) -> Self:
@@ -227,9 +236,8 @@ class Client:
         self.identity = Identity.load_or_create(self.config.state_dir)
 
         # ipfilter.dat files are Latin-1 text, and only their addresses and levels are read
-        ip_filter = IpFilter()
-        if self.config.ip_filter is not None:
-            ip_filter = IpFilter.parse(self.config.ip_filter.read_text(encoding='latin-1').splitlines())
+        # A configured filter is read now, while the automatic one is fetched on entering the context, off the loop
+        ip_filter = IpFilter.load(self.config.ip_filter) if self.config.ip_filter is not None else IpFilter()
         self.policy = AddressPolicy(ip_filter=ip_filter, allow_private=self.config.allow_private_peers)
         self.library = SharedLibrary(state_dir=self.config.state_dir, read_chunk=self.config.io.read_chunk)
 
@@ -270,7 +278,38 @@ class Client:
             err_msg = f'{self.config.state_dir} is used by another client process'
             raise StateInUseError(err_msg) from error
 
+        if self.config.ip_filter is None and self.config.ip_filter_url:
+            self.policy.ip_filter = await self._automatic_ip_filter()
         return self
+
+    async def _automatic_ip_filter(self) -> IpFilter:
+        """Take the IP filter from the state directory, downloading it when the copy is missing or too old.
+
+        A failed download falls back to the old copy, and without one the client runs unfiltered, as it would
+        without the setting, after a warning.
+
+        :returns: the filter, empty when none could be had.
+        :rtype: IpFilter
+        """
+        cache = self.config.state_dir / IP_FILTER_CACHE
+        if cache.exists() and time.time() - cache.stat().st_mtime < self.config.ip_filter_refresh:
+            return await asyncio.to_thread(IpFilter.load, cache)
+
+        # The download and the parse of some 175,000 lines take about a second, so they run in a thread
+        try:
+            return await asyncio.to_thread(
+                IpFilter.download,
+                self.config.ip_filter_url,
+                limits=self.config.limits,
+                timeout=self.config.timeouts.bootstrap_fetch,
+                save_to=cache,
+            )
+        except (OSError, ProtocolError) as error:
+            if cache.exists():
+                logger.warning('Using the old IP filter, because the download failed: %s', error)
+                return await asyncio.to_thread(IpFilter.load, cache)
+            logger.warning('Running without an IP filter, because the download failed: %s', error)
+            return IpFilter()
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None

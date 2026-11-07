@@ -13,23 +13,28 @@ The client trusts no byte it receives, and four kinds of input reach the disk or
 * Shared files are served by hash from an index built by the user, never by a path a peer names.
 """
 
+import bisect
+import io
 import ipaddress
 import re
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum, auto
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Literal, Self
 
-from ed2k_client.errors import SecurityError
+from ed2k_client.errors import ProtocolError, SecurityError
+from ed2k_client.fetch import fetch_https
+from ed2k_client.files import write_private
 from ed2k_client.settings import DEFAULT_IO, DEFAULT_LIMITS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    from ed2k_client.settings import IoSettings
+    from ed2k_client.settings import IoSettings, Limits
 
 FALLBACK_NAME: str = 'download'
 READ_BINARY: Literal['rb'] = 'rb'
@@ -43,6 +48,10 @@ IPFILTER_LINE = re.compile(r'^\s*([\d.]+)\s*-\s*([\d.]+)\s*,\s*(\d+)\s*,?(.*)$')
 # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/IPFilter.cpp#L143
 # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Preferences.cpp#L1220
 IPFILTER_BLOCK_BELOW: int = 127
+IPFILTER_ENCODING: str = 'latin-1'
+
+# The filter eMule Security maintains, a ZIP holding one ipfilter.dat that lists ranges known to host fakes
+DEFAULT_IP_FILTER_URL: str = 'https://upd.emule-security.org/ipfilter.zip'
 MAX_SUFFIX: int = 16
 PDF_MARKER: bytes = b'%PDF-'
 DJVU_MARKER: bytes = b'AT&TFORM'
@@ -388,6 +397,54 @@ class IpFilter:
     """
 
     ranges: list[IpRange] = field(default_factory=list)
+    _starts: list[int] = field(default_factory=list, init=False, repr=False)
+    _ends: list[int] = field(default_factory=list, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Sort and merge the ranges once, so that a lookup is a binary search over a list of 175,000 ranges."""
+        for item in sorted(self.ranges, key=lambda candidate: candidate.first):
+            # Ranges that overlap or touch become one, so the ranges left are disjoint and ordered
+            if self._ends and item.first <= self._ends[-1] + 1:
+                self._ends[-1] = max(self._ends[-1], item.last)
+            else:
+                self._starts.append(item.first)
+                self._ends.append(item.last)
+
+    @classmethod
+    def load(cls, path: Path) -> Self:
+        """Read a local ``ipfilter.dat``, whose text is Latin-1 and whose addresses and levels alone are read.
+
+        :param path: the file.
+        :type path: Path
+        :returns: the filter.
+        :rtype: Self
+        """
+        return cls.parse(path.read_text(encoding=IPFILTER_ENCODING).splitlines())
+
+    @classmethod
+    def download(cls, url: str, *, limits: Limits, timeout: float, save_to: Path | None = None) -> Self:
+        """Fetch a filter over HTTPS, as a plain ``ipfilter.dat`` or a ZIP holding one, and save its text if asked.
+
+        :param url: the HTTPS URL.
+        :type url: str
+        :param limits: the caps on the download and on the filter text it unpacks to.
+        :type limits: Limits
+        :param timeout: seconds the download may take.
+        :type timeout: float
+        :param save_to: a file to write the filter text to, readable by its owner only.
+        :type save_to: Path | None
+        :returns: the filter.
+        :rtype: Self
+        :raises ProtocolError: when the download or the text exceeds its cap or the archive is broken.
+        """
+        body = fetch_https(url, limit=limits.ip_filter_bytes, timeout=timeout)
+        text = _unpacked_filter(body, limit=limits.ip_filter_text_bytes) if body.startswith(ZIP_SIGNATURE) else body
+        ip_filter = cls.parse(text.decode(IPFILTER_ENCODING).splitlines())
+
+        # Saved only once it parsed, so a broken download never replaces a good copy
+        if save_to is not None:
+            write_private(save_to, text)
+        return ip_filter
 
     @classmethod
     def parse(cls, lines: Iterable[str]) -> Self:
@@ -427,7 +484,46 @@ class IpFilter:
         :rtype: bool
         """
         value = int(ipaddress.IPv4Address(address))
-        return any(item.first <= value <= item.last for item in self.ranges)
+        index = bisect.bisect_right(self._starts, value) - 1
+        return index >= 0 and value <= self._ends[index]
+
+
+def _unpacked_filter(archive_bytes: bytes, *, limit: int) -> bytes:
+    """Unpack the one filter file of a ZIP archive and refuse text larger than ``limit``.
+
+    :param archive_bytes: the archive.
+    :type archive_bytes: bytes
+    :param limit: the largest accepted filter text in bytes.
+    :type limit: int
+    :returns: the filter text.
+    :rtype: bytes
+    :raises ProtocolError: when the archive is broken, holds no file or unpacks beyond the limit.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(archive_bytes))
+    except zipfile.BadZipFile as error:
+        err_msg = f'broken IP filter archive: {error}'
+        raise ProtocolError(err_msg) from error
+
+    with archive:
+        members = [member for member in archive.infolist() if not member.is_dir()]
+        if not members:
+            err_msg = 'the IP filter archive holds no file'
+            raise ProtocolError(err_msg)
+
+        # Read through a stream with a cap, because the size the archive declares is the sender's word only. zipfile
+        # raises NotImplementedError for a compression method it lacks and RuntimeError for an encrypted member
+        try:
+            with archive.open(members[0]) as stream:
+                text = stream.read(limit + 1)
+        except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError) as error:
+            err_msg = f'broken IP filter archive member: {error}'
+            raise ProtocolError(err_msg) from error
+
+    if len(text) > limit:
+        err_msg = f'the IP filter unpacks beyond {limit} bytes'
+        raise ProtocolError(err_msg)
+    return text
 
 
 @dataclass(slots=True)

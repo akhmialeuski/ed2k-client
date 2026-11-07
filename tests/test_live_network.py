@@ -14,6 +14,8 @@ from ed2k_client import Client, SearchQuery, ServerEntry, ServerList
 from ed2k_client.client import ClientConfig
 from ed2k_client.constants import LOW_ID_LIMIT
 from ed2k_client.download import DownloadSettings
+from ed2k_client.security import DEFAULT_IP_FILTER_URL, IpFilter
+from ed2k_client.settings import DEFAULT_LIMITS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +27,8 @@ SEARCHING_SERVER = ServerEntry(host='85.17.116.222', port=6082, name='ed2k-rust'
 KEYWORD = 'springer'
 BOOK_EXTENSIONS = ('.pdf', '.djvu')
 BOOK_QUERY = SearchQuery(text=KEYWORD, extensions=BOOK_EXTENSIONS)
+MANY_RANGES = 100_000
+FILTER_TIMEOUT = 60.0
 
 
 def live_config(root: Path) -> ClientConfig:
@@ -53,6 +57,19 @@ class TestServerListDownload:
 
         assert len(servers.servers) >= 5
         assert any(server.users > 1000 for server in servers.servers)
+
+
+class TestIpFilterDownload:
+    """Tests of :meth:`IpFilter.download`."""
+
+    async def test_ip_filter_lists_many_ranges_and_spares_the_searching_server(self) -> None:
+        """The eMule Security filter unpacks within the caps, lists many ranges and does not block a known server."""
+        ip_filter = await asyncio.to_thread(
+            IpFilter.download, DEFAULT_IP_FILTER_URL, limits=DEFAULT_LIMITS, timeout=FILTER_TIMEOUT
+        )
+
+        assert len(ip_filter.ranges) > MANY_RANGES
+        assert not ip_filter.blocks(SEARCHING_SERVER.host)
 
 
 class TestSearch:

@@ -26,6 +26,10 @@ server_met_url = 'https://upd.emule-security.org/server.met'
 server_sessions = 4
 # HTTPS URL of a `nodes.dat`.
 nodes_dat_url = 'https://upd.emule-security.org/nodes.dat'
+# HTTPS URL of the IP filter, a ZIP or a plain `ipfilter.dat`; empty to use no filter.
+ip_filter_url = 'https://upd.emule-security.org/ipfilter.zip'
+# Seconds after which the cached IP filter is downloaded again.
+ip_filter_refresh = 604800.0
 
 # Limits of each download.
 [download]
@@ -90,6 +94,10 @@ server_met_bytes = 2_097_152
 nodes_dat_contacts = 20_000
 # Bytes of a `nodes.dat`.
 nodes_dat_bytes = 1_048_576
+# Bytes of a downloaded IP filter, a ZIP archive or a plain `ipfilter.dat`.
+ip_filter_bytes = 8_388_608
+# Bytes of the `ipfilter.dat` a ZIP archive unpacks to.
+ip_filter_text_bytes = 67_108_864
 # Server messages kept for the status.
 server_messages = 50
 # Characters kept of one server message.

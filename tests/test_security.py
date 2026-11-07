@@ -2,9 +2,11 @@
 
 import io
 import re
+import struct
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from Crypto.Hash import MD4
@@ -22,10 +24,32 @@ from ed2k_client.security import (
     resolve_inside,
     sanitize_filename,
 )
-from ed2k_client.settings import DEFAULT_IO
+from ed2k_client.settings import DEFAULT_IO, DEFAULT_LIMITS, Limits
 
 if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
     from pyfakefs.fake_filesystem import FakeFilesystem
+
+FETCH = 'ed2k_client.security.fetch_https'
+FILTER_URL = 'https://lists.example.org/ipfilter.zip'
+FILTER_MEMBER = 'guarding.p2p'
+FILTER_FILE = Path('/state/ipfilter.dat')
+FILTER_TEXT = (
+    b'001.002.003.000 - 001.002.003.255 , 000 , fakes\n'
+    b'001.002.004.000 - 001.002.004.010 , 000 , touching the range above\n'
+    b'009.009.009.009 - 009.009.009.009 , 200 , level above the threshold\n'
+)
+TIMEOUT = 1.0
+
+ZIP_START = b'PK\x03\x04'
+
+# A member header the reader cannot follow: where the flags field, followed by the method field, sits after the
+# local and the central header signatures, the encryption flag, and a compression method Python has no decoder for
+CENTRAL_START = b'PK\x01\x02'
+HEADER_FIELDS = ((ZIP_START, 6), (CENTRAL_START, 8))
+ENCRYPTED_FLAG = 0x1
+UNSUPPORTED_METHOD = 99
 
 DOWNLOADS = Path('/downloads')
 QUARANTINE = Path('/q')
@@ -42,19 +66,39 @@ MACRO_DANGER = 'Office document with macros'
 MAPS_ZIP = 'maps.zip'
 
 
-def _zip_of(*names: str) -> bytes:
-    """Build a ZIP archive in memory whose members carry the given names.
+def _zip_of(*names: str, contents: bytes = b'member') -> bytes:
+    """Build a ZIP archive in memory whose members carry the given names and the same contents.
 
     :param names: the member names.
     :type names: str
+    :param contents: the bytes of every member.
+    :type contents: bytes
     :returns: the archive bytes.
     :rtype: bytes
     """
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w') as archive:
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for name in names:
-            archive.writestr(name, b'member')
+            archive.writestr(name, contents)
     return buffer.getvalue()
+
+
+def _with_member_header(archive: bytes, *, flags: int, method: int) -> bytes:
+    """Rewrite the flags and the compression method of a one-member archive in both of its headers.
+
+    :param archive: the archive.
+    :type archive: bytes
+    :param flags: the general purpose flags to write.
+    :type flags: int
+    :param method: the compression method to write.
+    :type method: int
+    :returns: the rewritten archive.
+    :rtype: bytes
+    """
+    data = bytearray(archive)
+    for signature, flags_at in HEADER_FIELDS:
+        struct.pack_into('<HH', data, data.index(signature) + flags_at, flags, method)
+    return bytes(data)
 
 
 MACRO_DOCUMENT = _zip_of('[Content_Types].xml', 'word/document.xml', 'word/vbaProject.bin')
@@ -120,6 +164,72 @@ class TestAddressPolicy:
         assert not policy.permits(PUBLIC_IP, 0)
         assert not policy.permits('not-an-ip', PORT)
         assert AddressPolicy(allow_private=True).permits(LOOPBACK, PORT)
+
+
+class TestIpFilter:
+    """Tests of :class:`IpFilter`."""
+
+    def test_touching_ranges_merge_and_bounds_hold(self) -> None:
+        """Touching ranges act as one, both bounds of a range block, and a range at a permitting level blocks nothing."""
+        ip_filter = IpFilter.parse(FILTER_TEXT.decode().splitlines())
+
+        verdicts = [ip_filter.blocks(host) for host in ('1.2.2.255', '1.2.3.0', '1.2.4.10', '1.2.4.11', '9.9.9.9')]
+
+        assert verdicts == [False, True, True, False, False]
+
+    @patch(FETCH, autospec=True)
+    def test_downloaded_archive_is_unpacked_and_saved(self, fetch: MagicMock, fs: FakeFilesystem) -> None:
+        """The one file of a downloaded archive becomes the filter, and its text is saved for its owner.
+
+        :param fetch: the mocked HTTPS download, which returns an archive holding the filter.
+        :type fetch: MagicMock
+        :param fs: the in-memory file system that receives the saved text.
+        :type fs: FakeFilesystem
+        """
+        fetch.return_value = _zip_of(FILTER_MEMBER, contents=FILTER_TEXT)
+        fs.create_dir(FILTER_FILE.parent)
+
+        ip_filter = IpFilter.download(FILTER_URL, limits=DEFAULT_LIMITS, timeout=TIMEOUT, save_to=FILTER_FILE)
+
+        assert ip_filter.blocks('1.2.3.4')
+        assert FILTER_FILE.read_bytes() == FILTER_TEXT
+
+    @patch(FETCH, autospec=True)
+    def test_archive_unpacking_beyond_the_cap_is_refused(self, fetch: MagicMock) -> None:
+        """An archive whose file unpacks beyond the text cap is refused, whatever size it declares.
+
+        :param fetch: the mocked HTTPS download, which returns a small archive of a large file.
+        :type fetch: MagicMock
+        """
+        fetch.return_value = _zip_of(FILTER_MEMBER, contents=bytes(4096))
+
+        with pytest.raises(ProtocolError, match='unpacks beyond'):
+            IpFilter.download(FILTER_URL, limits=Limits(ip_filter_text_bytes=1024), timeout=TIMEOUT)
+
+    @pytest.mark.parametrize(
+        ('flags', 'method'),
+        [(0, UNSUPPORTED_METHOD), (ENCRYPTED_FLAG, zipfile.ZIP_DEFLATED)],
+        ids=['unsupported-method', 'encrypted'],
+    )
+    @patch(FETCH, autospec=True)
+    def test_member_that_cannot_be_read_is_a_protocol_error(self, fetch: MagicMock, flags: int, method: int) -> None:
+        """A member with a compression method Python lacks, or an encrypted one, fails as a protocol error.
+
+        zipfile raises ``NotImplementedError`` and ``RuntimeError`` for them, which the client's fallback to its cached
+        or empty filter does not catch, so such an archive on the filter host would stop the client from starting.
+
+        :param fetch: the mocked HTTPS download, which returns the archive with the rewritten header.
+        :type fetch: MagicMock
+        :param flags: the general purpose flags of the member.
+        :type flags: int
+        :param method: the compression method of the member.
+        :type method: int
+        """
+        archive = _zip_of(FILTER_MEMBER, contents=FILTER_TEXT)
+        fetch.return_value = _with_member_header(archive, flags=flags, method=method)
+
+        with pytest.raises(ProtocolError, match='broken IP filter archive member'):
+            IpFilter.download(FILTER_URL, limits=DEFAULT_LIMITS, timeout=TIMEOUT)
 
 
 class TestInspectDocument:

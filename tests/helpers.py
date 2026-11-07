@@ -77,6 +77,8 @@ def make_config(root: Path, name: str, **overrides: object) -> ClientConfig:
         udp_port=0,
         allow_private_peers=True,
         download=FAST,
+        # No test on loopback reaches the internet for the IP filter, which would also block nothing on loopback
+        ip_filter_url='',
     )
     return replace(config, **overrides)
 

@@ -148,8 +148,12 @@ Everything that arrives from the network is untrusted, and these are the defence
 
 - Every length field is checked against a limit before anything is read or allocated, and zlib data is inflated
   with an output cap, so a malformed or hostile packet costs a bounded amount of memory and time.
-- Addresses from servers, Kad and peers are dialled only when they are global unicast IPv4 addresses outside an
-  optional eMule `ipfilter.dat`, so a hostile server cannot make the client probe the local network.
+- Addresses from servers, Kad and peers are dialled only when they are global unicast IPv4 addresses outside the IP
+  filter, so a hostile server cannot make the client probe the local network. The filter is the `ipfilter.dat` that
+  eMule Security keeps of ranges known to host fake servers and poisoned files, about 176,000 ranges, downloaded over
+  HTTPS on entering the client, cached in the state directory and fetched again after `ip_filter_refresh`, seven
+  days by default. A failed download keeps the old copy, and without one the client runs unfiltered after a warning.
+  `ip_filter` names a local file instead, and an empty `ip_filter_url` turns the filter off.
 - File names from the network are sanitised to one path component and every write is proved to stay inside its
   directory, which defeats `../` and absolute-path tricks.
 - Downloaded data stays in quarantine until its eD2k hash and every part hash match, and a part that matched is never
