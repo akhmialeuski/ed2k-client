@@ -43,7 +43,7 @@ asyncio.run(main())
 The main entry points:
 
 | Call                                                 | What it does                                                  |
-| ---------------------------------------------------- | ------------------------------------------------------------- |
+|------------------------------------------------------|---------------------------------------------------------------|
 | `Client(ClientConfig(...))`                          | Loads or creates the identity, takes the state directory lock |
 | `await client.connect(server=None)`                  | Logs in to a server and returns the assigned High or Low ID   |
 | `await client.connect_kad()`                         | Bootstraps Kad and returns the number of live contacts        |
@@ -58,32 +58,67 @@ The main entry points:
 Several downloads run concurrently with `asyncio.gather` on one client. One state directory serves one client at a
 time, because a server keeps a single session per user hash.
 
+## Settings
+
+Every value the client chose rather than the protocol is a field of `ClientConfig`, grouped by concern, with the
+values the PoC was tested with as defaults:
+
+| Group          | Holds                                                                              |
+|----------------|------------------------------------------------------------------------------------|
+| `ClientConfig` | Directories, ports, nickname, server list and `nodes.dat` sources, IP filter       |
+| `download`     | Peers at once, queue wait, reask interval, source refresh, deadline, content check |
+| `timeouts`     | Connect, read, server login, search and sources, bootstrap download                |
+| `limits`       | Caps on packet sizes, tags, strings, results, sources and bootstrap files          |
+| `kad`          | Lookup parallelism and width, rounds, bootstrap and search fan-out, Kad timeout    |
+| `peer`         | Blocks per request, send chunk, obfuscation padding                                |
+| `share`        | Upload slots, incoming connections                                                 |
+| `io`           | Read, scan and file-type buffer sizes                                              |
+
+```python
+from dataclasses import replace
+from pathlib import Path
+
+from ed2k_client import ClientConfig, DownloadSettings
+
+config = replace(ClientConfig(), download=DownloadSettings(deadline=24 * 3600, max_peers=8))
+config = ClientConfig.from_toml(Path('my-settings.toml'))
+```
+
+Each group refuses a value that cannot work when it is built. Values the protocol fixes, such as the part size,
+the obfuscation magic numbers and the Kad search tolerance, stay constants, because changing them would break every
+exchange with other clients. [config.example.toml](config.example.toml) lists every setting with its default and
+description, and `scripts/render_config_example.py` regenerates it from the code.
+
 ## Command line
 
 ```bash
 uv run ed2k-client search "springer 2025" --json
-uv run ed2k-client download "ed2k://|file|Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|/"
-uv run ed2k-client share ~/books --seconds 3600
+uv run ed2k-client download "ed2k://|file|Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|/" --deadline-hours 24
+uv run ed2k-client --config config.example.toml share ~/books --seconds 3600 --upload-slots 4
 uv run ed2k-client hash book.pdf
 uv run ed2k-client servers
 ```
 
-`--server ed2k://|server|ip|port|/` picks a server, `--no-kad` and `--no-server` skip a network, and `--udp-port 0`
-lets Kad use any free port. `download` accepts several links and fetches them concurrently with one identity.
+`scripts/ed2k.py` runs the same command line from a checkout with `uv run scripts/ed2k.py ...`. `--config` reads a
+TOML file shaped like [config.example.toml](config.example.toml), and a flag wins over the file. `--server
+ed2k://|server|ip|port|/` picks a server, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use
+any free port, and `--connect-timeout` and `--read-timeout` set the connection timeouts. `download` accepts several
+links and fetches them concurrently with one identity, `--deadline-hours` and `--max-peers` bound each download, and
+`share` takes `--upload-slots`.
 
 ## Design
 
 The package is layered so that each module owns one concern:
 
-| Layer          | Modules                                                     | Responsibility                                  |
-| -------------- | ----------------------------------------------------------- | ----------------------------------------------- |
-| Facade         | `client.py`, `cli.py`                                       | One object and one command line over everything |
-| Transfers      | `download.py`, `partfile.py`, `share.py`                    | Scheduling, verification, resume, serving       |
-| Sessions       | `server.py`, `peer.py`, `kad/node.py`                       | The three protocol conversations                |
-| Transport      | `transport.py`, `obfuscation.py`                            | Framed TCP packets, limits, timeouts, RC4       |
-| Wire format    | `wire.py`, `tags.py`, `search.py`, `links.py`, `hashing.py` | Bytes in and out, parsed with hard limits       |
-| Bootstrap data | `servermet.py`, `kad/contacts.py`, `fetch.py`               | `server.met`, `nodes.dat`, HTTPS download       |
-| Defences       | `security.py`, `identity.py`                                | Names, paths, addresses, content, identity      |
+| Layer          | Modules                                                     | Responsibility                              |
+|----------------|-------------------------------------------------------------|---------------------------------------------|
+| Facade         | `client.py`, `cli.py`, `settings.py`                        | One object, one command line, every setting |
+| Transfers      | `download.py`, `partfile.py`, `share.py`                    | Scheduling, verification, resume, serving   |
+| Sessions       | `server.py`, `peer.py`, `kad/node.py`                       | The three protocol conversations            |
+| Transport      | `transport.py`, `obfuscation.py`                            | Framed TCP packets, limits, timeouts, RC4   |
+| Wire format    | `wire.py`, `tags.py`, `search.py`, `links.py`, `hashing.py` | Bytes in and out, parsed with hard limits   |
+| Bootstrap data | `servermet.py`, `kad/contacts.py`, `fetch.py`               | `server.met`, `nodes.dat`, HTTPS download   |
+| Defences       | `security.py`, `identity.py`                                | Names, paths, addresses, content, identity  |
 
 A download keeps a part file in `<download_dir>/.incoming` with its progress in JSON next to it, both readable by
 the owner only. Workers dial the sources the server and Kad report, request up to three 180 KiB blocks at a time,
@@ -118,7 +153,7 @@ viewer with JavaScript disabled.
 ## Tests
 
 | Command                        | What runs                                                             |
-| ------------------------------ | --------------------------------------------------------------------- |
+|--------------------------------|-----------------------------------------------------------------------|
 | `uv run pytest`                | Unit tests in memory, including RHash vectors for the eD2k hash       |
 | `uv run pytest -m integration` | Real clients over loopback, a fake eD2k server and a fake Kad network |
 | `uv run pytest -m network`     | The live eD2k and Kad networks, on a host that may reach them         |
