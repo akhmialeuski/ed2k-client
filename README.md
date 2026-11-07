@@ -138,20 +138,24 @@ Everything that arrives from the network is untrusted, and these are the defence
   optional eMule `ipfilter.dat`, so a hostile server cannot make the client probe the local network.
 - File names from the network are sanitised to one path component and every write is proved to stay inside its
   directory, which defeats `../` and absolute-path tricks.
-- Downloaded data stays in quarantine until its eD2k hash and every part hash match. The content is then classified
-  by its magic bytes, and `download.content_policy` decides what leaves quarantine. `documents`, the default,
-  releases only PDF and DjVu. `safe` (`--safe-content`) releases files of any kind except programs, scripts and
-  Office documents that may carry macros. `any` (`--any-content`) releases everything and only records the verdict.
-  Under the first two, a PDF is refused when its dictionaries carry `/JavaScript`, `/JS`, `/Launch`,
-  `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm` (hex-escaped names included), outside its strings,
-  comments and stream bodies. Under the first two, a file is also refused when the name it is released under has an
-  extension that runs when opened, such as `.bat`, `.js`, `.hta` or `.docm`, and a ZIP is refused when it holds an
-  Office macro project or a Java manifest. Other archives pass `safe` as notable, because their other members are
-  not inspected. Released files are mode 0600, never executable.
+- Downloaded data stays in quarantine until its eD2k hash and every part hash match, and a part that matched is never
+  written again: a peer sending data for it is banned. The content is then classified by its magic bytes, and
+  `download.content_policy` decides what leaves quarantine. `documents`, the default, releases only PDF and DjVu. `safe`
+  (`--safe-content`) releases files of any kind except programs, scripts and Office documents that may carry macros.
+  `any` (`--any-content`) releases everything and only records the verdict. Under the first two, a PDF is refused when
+  its dictionaries carry `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm`
+  (hex-escaped names included), outside its strings, comments and stream bodies. An object header inside a stream body
+  ends it for the scan, because a reader reaches an object by its xref offset wherever it lies. Under the first two, a
+  file is also refused when the name it is released under has an extension on the list of [file types Outlook
+  blocks](https://support.microsoft.com/en-us/office/blocked-attachments-in-outlook-434752e1-02d3-4e90-9124-8b81e49a8519),
+  such as `.bat`, `.chm`, `.py` or `.hta`, or a macro-enabled Office extension such as `.docm`, and when it is named
+  `.pdf` without a PDF header in its first kilobyte. A ZIP is refused when it holds an Office macro project or a Java
+  manifest. Other archives pass `safe` as notable, because their other members are not inspected. Released files are
+  mode 0600, never executable.
 - Sharing is off until `share()` is called. Peers name files only by hash, symbolic links are not shared, and a
   file changed on disk after hashing is withdrawn instead of served.
 - Kad answers are accepted only from a node the client is waiting on for that opcode, which drops forged answers.
-- `server.met` and `nodes.dat` are fetched over HTTPS only.
+- `server.met` and `nodes.dat` are fetched over HTTPS only, and a redirect to plain HTTP is refused.
 
 The content inspection catches the common carriers of PDF malware, but it does not parse compressed object
 streams, so it reports `/ObjStm` as notable. A file that passes is still untrusted data: open it in an up-to-date
