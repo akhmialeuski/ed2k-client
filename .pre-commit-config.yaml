@@ -80,6 +80,11 @@ repos:
         entry: bash -c 'cd PoCs/ed2k-client && uv run pyrefly check'
         language: system
         pass_filenames: false
+      - id: config-example
+        name: config.example.toml matches the settings defaults
+        entry: bash -c 'cd PoCs/ed2k-client && uv run scripts/render_config_example.py --check'
+        language: system
+        pass_filenames: false
       - id: pytest
         name: pytest unit tests
         entry: bash -c 'cd PoCs/ed2k-client && uv run pytest -q'
