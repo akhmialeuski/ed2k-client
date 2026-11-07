@@ -1,17 +1,18 @@
 """Parse and build ``ed2k://`` links for files and servers.
 
 A file link is ``ed2k://|file|<name>|<size>|<hash>|[h=<aich>|][p=<parts>|]/`` with a percent-encoded name, as in
-``ED2KLink.cpp`` of aMule. Optional fields after the hash are kept only when they are the AICH root, other fields
-are ignored.
+``ED2KLink.cpp`` of aMule. Optional fields after the hash are kept only when they are the AICH root, a SHA-1 hash in
+base32, other fields are ignored.
 """
 
+import base64
 import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Self, override
 from urllib.parse import quote, unquote
 
-from ed2k_client.constants import MAX_FILE_SIZE
+from ed2k_client.constants import AICH_HASH_LENGTH, MAX_FILE_SIZE
 from ed2k_client.errors import ProtocolError
 from ed2k_client.hashing import Ed2kHash
 
@@ -19,6 +20,7 @@ SCHEME: str = 'ed2k://'
 FILE_FIELDS: int = 4
 SERVER_FIELDS: int = 3
 AICH_PREFIX: str = 'h='
+ASCII: str = 'ascii'
 MAX_PORT: int = 65_535
 
 # Sizes and ports are written in ASCII digits. str.isdigit() also accepts other Unicode digits, some of which int()
@@ -38,6 +40,28 @@ def valid_file_size(size: int) -> bool:
     return 0 < size <= MAX_FILE_SIZE
 
 
+def _aich_root(text: str) -> bytes:
+    """Decode the AICH root of a link.
+
+    :param text: the base32 text after ``h=``.
+    :type text: str
+    :returns: the 20-byte root.
+    :rtype: bytes
+    :raises ProtocolError: when the text is not the base32 form of a SHA-1 hash.
+    """
+    # A root that is not a hash would make every part fail, so a link carrying one is refused as a whole. base64
+    # raises binascii.Error for bad padding or letters, and its parent ValueError for text that is not ASCII
+    try:
+        root = base64.b32decode(text, casefold=True)
+    except ValueError as error:
+        err_msg = f'invalid AICH root in link: {text!r}'
+        raise ProtocolError(err_msg) from error
+    if len(root) != AICH_HASH_LENGTH:
+        err_msg = f'AICH root of {len(root)} bytes in link'
+        raise ProtocolError(err_msg)
+    return root
+
+
 @dataclass(frozen=True, slots=True)
 class FileLink:
     """A link to a file.
@@ -45,13 +69,13 @@ class FileLink:
     :ivar name: the suggested file name, untrusted.
     :ivar size: the file size in bytes.
     :ivar file_hash: the eD2k hash.
-    :ivar aich_root: the AICH root hash in base32, when the link carries one.
+    :ivar aich_root: the AICH root hash, when the link carries one.
     """
 
     name: str
     size: int
     file_hash: Ed2kHash
-    aich_root: str | None = None
+    aich_root: bytes | None = None
 
     @classmethod
     def parse(cls, link: str) -> Self:
@@ -75,7 +99,8 @@ class FileLink:
             raise ProtocolError(err_msg)
 
         aich = next((field.removeprefix(AICH_PREFIX) for field in fields[4:] if field.startswith(AICH_PREFIX)), None)
-        return cls(name=name, size=int(size_text), file_hash=Ed2kHash.from_hex(hash_text), aich_root=aich)
+        root = None if aich is None else _aich_root(aich)
+        return cls(name=name, size=int(size_text), file_hash=Ed2kHash.from_hex(hash_text), aich_root=root)
 
     @override
     def __str__(self) -> str:
@@ -85,7 +110,7 @@ class FileLink:
         :rtype: str
         """
         # safe='' encodes the slash too, because a '|' or '/' in a name would end the field or the link
-        aich = f'{AICH_PREFIX}{self.aich_root}|' if self.aich_root is not None else ''
+        aich = '' if self.aich_root is None else f'{AICH_PREFIX}{base64.b32encode(self.aich_root).decode(ASCII)}|'
         return f'{SCHEME}|file|{quote(self.name, safe="")}|{self.size}|{self.file_hash.hex}|{aich}/'
 
 

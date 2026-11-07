@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ed2k_client import (
+    AichPolicy,
     Client,
     ContentPolicy,
     DownloadError,
     FileLink,
+    LinkMismatchError,
     SecurityError,
     Source,
     StateInUseError,
@@ -30,11 +32,13 @@ from ed2k_client.partfile import PartState
 from ed2k_client.security import DocumentKind
 from ed2k_client.settings import ShareSettings
 from ed2k_client.sources import SourceOrigin, client_id_from_host
+from tests.fakes import FakePeer
 from tests.helpers import (
     DJVU_HEADER,
     FAST,
     LOOPBACK,
     ServeSpy,
+    aich_tree,
     compressible,
     corrupting,
     failing_after,
@@ -67,6 +71,12 @@ METADATA_GLOB = '*.part.json'
 BANNING = 'Banning'
 DEADLINE = 'deadline'
 SHORT = replace(FAST, deadline=6.0)
+OTHER = 'other.pdf'
+NO_SINGLE_PEER = 'no single peer'
+
+# Two parts, the second one block long, so the answer for the first part also proves the second
+AICH_SIZE = PART_SIZE + BLOCK_SIZE // 2
+CHANGED_BLOCK = 3
 
 
 def source_file(root: Path, name: str, data: bytes) -> Path:
@@ -516,3 +526,179 @@ class TestClientContext:
             with pytest.raises(StateInUseError):
                 async with Client(config):
                     pass
+
+
+def aich_link(path: Path, root: bytes) -> FileLink:
+    """Build the ed2k link of a local file with an AICH root.
+
+    :param path: the file whose eD2k hash the link carries.
+    :type path: Path
+    :param root: the AICH root the link carries.
+    :type root: bytes
+    :returns: the link.
+    :rtype: FileLink
+    """
+    return replace(link_for(path), aich_root=root)
+
+
+def with_changed_block(data: bytes) -> bytes:
+    """Copy content with one block of the first part changed, as a forged twin of the file would be.
+
+    :param data: the content.
+    :type data: bytes
+    :returns: the changed copy.
+    :rtype: bytes
+    """
+    start = CHANGED_BLOCK * BLOCK_SIZE
+    return data[:start] + bytes(byte ^ 0xFF for byte in data[start : start + BLOCK_SIZE]) + data[start + BLOCK_SIZE :]
+
+
+class TestAich:
+    """Tests of AICH verification against fake eMule seeders, which answer the AICH requests real clients serve."""
+
+    async def test_link_with_a_root_downloads_from_an_aich_source(self, tmp_path: Path) -> None:
+        """A link with an AICH root downloads from a complete AICH source, asking only for the first part.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        tree = aich_tree(data)
+        async with AsyncExitStack() as stack:
+            peer = await stack.enter_async_context(FakePeer(data, hashes=hash_file(payload), aich=tree))
+            leecher = await leech(stack, tmp_path)
+            result = await leecher.download(aich_link(payload, tree[1]), extra_sources=[peer.source])
+
+        assert result.path.read_bytes() == data
+        assert peer.aich_requests == [0]
+
+    async def test_required_aich_waits_for_a_source_until_the_deadline(self, tmp_path: Path) -> None:
+        """Without a peer serving AICH hashes no part is fetched, and the deadline names the waiting parts.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        async with AsyncExitStack() as stack:
+            peer = await stack.enter_async_context(FakePeer(data, hashes=hash_file(payload), aich=None))
+            leecher = await leech(stack, tmp_path, download=SHORT)
+            with pytest.raises(DownloadError, match='wait for AICH'):
+                await leecher.download(aich_link(payload, aich_tree(data)[1]), extra_sources=[peer.source])
+
+        assert peer.served == 0
+
+    async def test_md4_alone_is_accepted_when_the_policy_allows_it(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Under the prefer policy a link with a root downloads from a peer without AICH, with a warning per part.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        async with AsyncExitStack() as stack:
+            peer = await stack.enter_async_context(FakePeer(data, hashes=hash_file(payload), aich=None))
+            leecher = await leech(stack, tmp_path, download=replace(FAST, aich=AichPolicy.PREFER))
+            result = await leecher.download(aich_link(payload, aich_tree(data)[1]), extra_sources=[peer.source])
+
+        assert result.path.read_bytes() == data
+        assert sum('MD4 alone' in message for message in caplog.messages) == 2
+
+    async def test_corrupt_blocks_ban_only_their_sender(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Blocks AICH proves wrong ban the peer that sent them, and the honest peer completes the file.
+
+        Without AICH a part written by both peers would convict neither and be fetched again whole.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        caplog.set_level(logging.INFO)
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        tree = aich_tree(data)
+        async with AsyncExitStack() as stack:
+            hostile = await stack.enter_async_context(
+                FakePeer(data, hashes=hash_file(payload), aich=tree, corrupt=True)
+            )
+            honest = await stack.enter_async_context(FakePeer(data, hashes=hash_file(payload), aich=tree))
+            leecher = await leech(stack, tmp_path)
+            result = await leecher.download(aich_link(payload, tree[1]), extra_sources=[hostile.source, honest.source])
+
+        assert result.path.read_bytes() == data
+        assert hostile.served > 0
+        assert any(f'{BANNING} {LOOPBACK}:{hostile.port}' in message for message in caplog.messages)
+        assert not any(f'{BANNING} {LOOPBACK}:{honest.port}' in message for message in caplog.messages)
+        # Every failed block had one sender, and the honest peer's blocks were kept rather than fetched again
+        assert not any(NO_SINGLE_PEER in message for message in caplog.messages)
+        assert honest.served <= AICH_SIZE
+
+    async def test_forged_aich_answer_bans_the_peer(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Hashes that do not fold to the root of the link ban the peer that sent them.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        caplog.set_level(logging.INFO)
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        tree = aich_tree(data)
+        async with AsyncExitStack() as stack:
+            forger = await stack.enter_async_context(
+                FakePeer(data, hashes=hash_file(payload), aich=aich_tree(with_changed_block(data)))
+            )
+            leecher = await leech(stack, tmp_path, download=SHORT)
+            with pytest.raises(DownloadError, match=DEADLINE):
+                await leecher.download(aich_link(payload, tree[1]), extra_sources=[forger.source])
+
+        assert forger.served == 0
+        assert any('does not lead to the root' in message for message in caplog.messages)
+
+    async def test_part_matching_its_md4_but_not_its_aich_hashes_is_refused(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A part whose MD4 matches is still refused when a block contradicts the AICH root, as a collision would.
+
+        The peer serves content whose MD4 is the link's and AICH hashes of a twin that differs in one block, the way
+        a forged file built to collide with the original's MD4 would look.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        caplog.set_level(logging.INFO)
+        data = incompressible(AICH_SIZE)
+        payload = source_file(tmp_path, BOOK, data)
+        twin = aich_tree(with_changed_block(data))
+        async with AsyncExitStack() as stack:
+            peer = await stack.enter_async_context(FakePeer(data, hashes=hash_file(payload), aich=twin))
+            leecher = await leech(stack, tmp_path, download=SHORT)
+            with pytest.raises(DownloadError, match=DEADLINE):
+                await leecher.download(aich_link(payload, twin[1]), extra_sources=[peer.source])
+
+        assert any(f'{BANNING} {LOOPBACK}:{peer.port}' in message for message in caplog.messages)
+        assert not (download_dir(tmp_path) / BOOK).exists()
+
+    async def test_link_whose_hashes_name_different_files_fails_at_once(self, tmp_path: Path) -> None:
+        """A part every AICH hash accepts but the MD4 refuses ends the download, since no peer can satisfy both.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        data = incompressible(CHANGED_BLOCK * 2 * BLOCK_SIZE)
+        other = source_file(tmp_path, OTHER, with_changed_block(data))
+        tree = aich_tree(data)
+        async with AsyncExitStack() as stack:
+            peer = await stack.enter_async_context(FakePeer(data, hashes=hash_file(other), aich=tree))
+            leecher = await leech(stack, tmp_path)
+            with pytest.raises(LinkMismatchError):
+                await leecher.download(aich_link(other, tree[1]), extra_sources=[peer.source])

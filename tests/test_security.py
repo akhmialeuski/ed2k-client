@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import logging
 import re
 import struct
 import zipfile
@@ -14,8 +15,9 @@ from Crypto.Hash import MD4
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from ed2k_client.aich import ROOT_IDENT, AichTree, read_recovery
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
-from ed2k_client.errors import HashMismatchError, ProtocolError, SecurityError
+from ed2k_client.errors import HashMismatchError, LinkMismatchError, ProtocolError, SecurityError
 from ed2k_client.hashing import hash_file
 from ed2k_client.partfile import Block, PartFile, blocks_of_part
 from ed2k_client.security import (
@@ -29,6 +31,8 @@ from ed2k_client.security import (
     sanitize_filename,
 )
 from ed2k_client.settings import DEFAULT_IO, DEFAULT_LIMITS, Limits
+from ed2k_client.wire import Reader
+from tests.helpers import aich_tree, recovery_data
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -71,6 +75,7 @@ SOURCE_DIR = Path('/src')
 ZIP_ARCHIVE = 'ZIP archive'
 MACRO_DANGER = 'Office document with macros'
 MAPS_ZIP = 'maps.zip'
+AICH_BLOCKS = 3
 
 
 def _zip_of(*names: str, contents: bytes = b'member') -> bytes:
@@ -456,13 +461,15 @@ class TestCheckDocument:
             check_document(path, expected=None)
 
 
-def make_part_file(fs: FakeFilesystem, data: bytes) -> PartFile:
+def make_part_file(fs: FakeFilesystem, data: bytes, *, aich_root: bytes | None = None) -> PartFile:
     """Create a part file for ``data`` whose hash is computed from the same bytes.
 
     :param fs: the in-memory file system.
     :type fs: FakeFilesystem
     :param data: the file content.
     :type data: bytes
+    :param aich_root: the AICH root the link carries, if any.
+    :type aich_root: bytes | None
     :returns: the part file.
     :rtype: PartFile
     """
@@ -470,6 +477,8 @@ def make_part_file(fs: FakeFilesystem, data: bytes) -> PartFile:
     fs.create_file(source, contents=data)
     hashes = hash_file(source)
     part_file = PartFile.open(directory=QUARANTINE, name=BOOK, size=len(data), file_hash=hashes.file_hash)
+    if aich_root is not None:
+        part_file.aich = AichTree(size=len(data), root=aich_root)
     if hashes.part_hashes:
         part_file.set_hashset(hashes.part_hashes)
     return part_file
@@ -589,6 +598,109 @@ class TestPartFile:
 
         with pytest.raises(ProtocolError, match='hashset'):
             part_file.set_hashset([MD4.new(b'x').digest(), MD4.new(b'y').digest()])
+
+
+def prove_part(part_file: PartFile, tree: dict[int, bytes], part: int) -> None:
+    """Feed a part file the recovery answer a complete source would send for one part.
+
+    :param part_file: the part file, opened with the root of ``tree``.
+    :type part_file: PartFile
+    :param tree: every hash of the AICH tree the source holds.
+    :type tree: dict[int, bytes]
+    :param part: the part.
+    :type part: int
+    """
+    aich = part_file.aich
+    assert aich is not None
+    raw = recovery_data(tree, size=part_file.size, part=part)
+    aich.accept(part=part, hashes=read_recovery(Reader(raw), count=aich.hash_count(part)))
+
+
+def write_all(part_file: PartFile, data: bytes) -> None:
+    """Write every block of a single-part file.
+
+    :param part_file: the part file.
+    :type part_file: PartFile
+    :param data: the bytes to write.
+    :type data: bytes
+    """
+    for block in blocks_of_part(size=len(data), part=0):
+        part_file.write(block=block, start=block.start, data=data[block.start : block.end])
+
+
+class TestPartFileAich:
+    """Tests of the AICH check of :class:`PartFile`."""
+
+    def test_wrong_block_alone_is_wiped(self, fs: FakeFilesystem) -> None:
+        """A part with one wrong block fails on that block, and only that block is fetched again.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        data = bytes(range(256)) * (AICH_BLOCKS * BLOCK_SIZE // 256)
+        tree = aich_tree(data)
+        part_file = make_part_file(fs, data, aich_root=tree[ROOT_IDENT])
+        prove_part(part_file, tree, 0)
+        blocks = blocks_of_part(size=len(data), part=0)
+        spoiled = data[: blocks[1].start] + bytes(BLOCK_SIZE) + data[blocks[1].end :]
+
+        with pytest.raises(HashMismatchError) as caught:
+            write_all(part_file, spoiled)
+
+        assert caught.value.bad_blocks == (blocks[1].start,)
+        assert list(part_file.missing_blocks()) == [blocks[1]]
+
+    def test_matching_md4_does_not_save_a_wrong_block(self, fs: FakeFilesystem) -> None:
+        """Blocks the AICH root refuses fail the part even when its MD4 matches, as with an MD4 collision.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        data = bytes(range(256)) * (AICH_BLOCKS * BLOCK_SIZE // 256)
+        twin = bytes(BLOCK_SIZE) + data[BLOCK_SIZE:]
+        tree = aich_tree(twin)
+        part_file = make_part_file(fs, data, aich_root=tree[ROOT_IDENT])
+        prove_part(part_file, tree, 0)
+
+        with pytest.raises(HashMismatchError) as caught:
+            write_all(part_file, data)
+
+        assert caught.value.bad_blocks == (0,)
+        assert not part_file.verified_parts
+
+    def test_root_of_other_content_is_a_link_mismatch(self, fs: FakeFilesystem) -> None:
+        """Data every block hash accepts but the MD4 refuses means the link names two files.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        data = bytes(range(256)) * (AICH_BLOCKS * BLOCK_SIZE // 256)
+        twin = bytes(BLOCK_SIZE) + data[BLOCK_SIZE:]
+        tree = aich_tree(twin)
+        part_file = make_part_file(fs, data, aich_root=tree[ROOT_IDENT])
+        prove_part(part_file, tree, 0)
+
+        with pytest.raises(LinkMismatchError):
+            write_all(part_file, twin)
+
+    def test_part_without_proven_hashes_passes_on_md4_with_a_warning(
+        self, fs: FakeFilesystem, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A part no peer served AICH hashes for is decided by its MD4, and the log says so.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        caplog.set_level(logging.WARNING)
+        data = bytes(range(256)) * (AICH_BLOCKS * BLOCK_SIZE // 256)
+        part_file = make_part_file(fs, data, aich_root=aich_tree(data)[ROOT_IDENT])
+
+        write_all(part_file, data)
+
+        assert part_file.complete
+        assert any('MD4 alone' in message for message in caplog.messages)
 
 
 class TestBlocksOfPart:

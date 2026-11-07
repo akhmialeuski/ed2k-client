@@ -80,6 +80,8 @@ class EmuleOp(IntEnum):
     EMULEINFOANSWER = 0x02
     COMPRESSEDPART = 0x40
     QUEUERANKING = 0x60
+    AICHREQUEST = 0x9B
+    AICHANSWER = 0x9C
     REQUESTSOURCES2 = 0x83
     ANSWERSOURCES2 = 0x84
     MULTIPACKET = 0x92
@@ -224,6 +226,8 @@ LARGE_FILE_THRESHOLD: int = 0xFFFF_FFFF
 # The MD4 of no bytes, appended to the part hashes when a file is an exact multiple of PART_SIZE
 EMPTY_MD4: bytes = bytes.fromhex('31D6CFE0D16AE931B73C59D7E0C089C0')
 HASH_LENGTH: int = 16
+# AICH hashes are SHA-1 digests
+AICH_HASH_LENGTH: int = 20
 
 # Identity and versions announced to the network
 # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/common/ClientVersion.h#L42

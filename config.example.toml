@@ -46,6 +46,8 @@ source_refresh = 900.0
 deadline = 21600.0
 # Which finished files may leave quarantine.
 content_policy = 'safe'
+# What the AICH root of a link demands before a part is accepted.
+aich = 'require'
 # Seconds between two rounds of starting workers and reporting progress.
 poll_interval = 1.0
 # Failed connections in a row after which a source is dropped.

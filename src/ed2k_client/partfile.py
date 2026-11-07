@@ -1,21 +1,24 @@
-"""A file being downloaded: sparse data in quarantine, resumable progress and per-part MD4 verification.
+"""A file being downloaded: sparse data in quarantine, resumable progress and per-part MD4 and AICH verification.
 
 The data lives in ``<incoming>/<hash>.part`` and the progress in ``<hash>.part.json`` beside it, both readable by
 the owner only. Parts are split into blocks of 180 KiB that never cross a part boundary, the unit in which peers
 are asked for data. A block counts as received only when the union of the byte ranges written into it covers it,
 so overlapping or repeated data from a hostile peer cannot complete it early. A part that is complete is hashed
-and either marked verified or wiped and downloaded again.
+and either marked verified or wiped and downloaded again. When the link carries an AICH root and every block of the
+part has a proven SHA-1 hash, the blocks are checked one by one and only the wrong ones are wiped. A part verified by
+an earlier run is not checked again, whatever root the link carries now.
 """
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Literal, Self
 
-from Crypto.Hash import MD4
+from Crypto.Hash import MD4, SHA1
 
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
-from ed2k_client.errors import HashMismatchError, ProtocolError
+from ed2k_client.errors import HashMismatchError, LinkMismatchError, ProtocolError
 from ed2k_client.files import FILE_MODE, write_private
 from ed2k_client.hashing import data_part_count, expected_part_hash, hash_from_parts, hashset_length
 from ed2k_client.settings import DEFAULT_IO
@@ -24,7 +27,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from ed2k_client.aich import AichTree
     from ed2k_client.hashing import Ed2kHash
+
+logger = logging.getLogger(__name__)
 
 DIRECTORY_MODE: int = 0o700
 METADATA_SUFFIX: str = '.part.json'
@@ -126,7 +132,8 @@ class PartFile:
     :ivar size: the file size.
     :ivar file_hash: the eD2k hash.
     :ivar part_hashes: the verified hashset, empty until known for a multi-part file.
-    :ivar verified_parts: parts whose MD4 matched.
+    :ivar verified_parts: parts whose hashes matched.
+    :ivar aich: the AICH hashes proven so far, set by the caller when the link carries a root.
     :ivar data_path: the quarantined data file.
     :ivar metadata_path: the progress file.
     """
@@ -150,6 +157,7 @@ class PartFile:
         self.name = name
         self.size = size
         self.file_hash = file_hash
+        self.aich: AichTree | None = None
         self.part_hashes: tuple[bytes, ...] = ()
         self.verified_parts: set[int] = set()
         self._coverage: dict[Block, Coverage] = {}
@@ -264,7 +272,8 @@ class PartFile:
         :returns: the index of a part that just verified, or ``None``.
         :rtype: int | None
         :raises ProtocolError: when the data falls outside the block or into a part that is already verified.
-        :raises HashMismatchError: when a completed part fails its hash; the part is then wiped.
+        :raises HashMismatchError: when a completed part fails its hashes; what failed is then wiped.
+        :raises LinkMismatchError: when a completed part matches the AICH root of the link but not its MD4 hash.
         """
         end = start + len(data)
         if not data or start < block.start or end > block.end:
@@ -289,34 +298,61 @@ class PartFile:
         return self._verify_part(block.part)
 
     def _verify_part(self, part: int) -> int:
-        """Hash a completed part and mark it verified or wipe it.
+        """Hash a completed part and mark it verified, or wipe what failed.
+
+        The MD4 of the part and the SHA-1 of each block come from one read. When every block has a proven AICH hash
+        the blocks decide, so a part whose MD4 collides with the original still fails, and only the wrong blocks are
+        wiped. Otherwise the MD4 decides and a failed part is wiped whole.
 
         :param part: the part index.
         :type part: int
         :returns: the part index.
         :rtype: int
-        :raises HashMismatchError: when the part does not match its hash.
+        :raises HashMismatchError: when the part does not match its hashes.
+        :raises LinkMismatchError: when every block matches the AICH root but the part fails its MD4.
         """
-        start = part * PART_SIZE
-        digest = MD4.new()
+        blocks = blocks_of_part(size=self.size, part=part)
+        part_digest = MD4.new()
+        block_digests = []
         with self.data_path.open(READ_BINARY) as stream:
-            stream.seek(start)
-            remaining = min(PART_SIZE, self.size - start)
-            while remaining and (chunk := stream.read(min(self._read_chunk, remaining))):
-                digest.update(chunk)
-                remaining -= len(chunk)
+            stream.seek(blocks[0].start)
+            for block in blocks:
+                block_digest = SHA1.new()
+                remaining = block.end - block.start
+                while remaining and (chunk := stream.read(min(self._read_chunk, remaining))):
+                    part_digest.update(chunk)
+                    block_digest.update(chunk)
+                    remaining -= len(chunk)
+                block_digests.append(block_digest.digest())
 
         expected = expected_part_hash(
             file_hash=self.file_hash, size=self.size, part_hashes=self.part_hashes, index=part
         )
+        md4_matches = part_digest.digest() == expected
+        aich = self.aich
+        proven = [] if aich is None else [aich.block_hash(start=b.start, size=b.end - b.start) for b in blocks]
+        checked = bool(proven) and None not in proven
+        triples = zip(blocks, block_digests, proven, strict=True) if checked else []
+        bad = [block for block, digest, good in triples if digest != good]
 
-        # The coverage goes either way: a verified part needs it no more, and a failed part must be fetched again,
-        # which an empty coverage makes every one of its blocks missing for
-        for block in blocks_of_part(size=self.size, part=part):
+        # Data that every block hash accepts is the content the AICH root describes, so an MD4 that refuses it
+        # belongs to other content, and no peer can deliver a part both accept
+        if checked and not bad and not md4_matches:
+            err_msg = f'part {part} matches the AICH root of the link but not its MD4 hash'
+            raise LinkMismatchError(err_msg)
+
+        # The coverage goes either way: a verified part needs it no more, and a failed block must be fetched again,
+        # which an empty coverage makes it missing for
+        failed = bad if checked else ([] if md4_matches else blocks)
+        for block in failed or blocks:
             self._coverage.pop(block, None)
-        if digest.digest() != expected:
-            err_msg = f'part {part} of {self.file_hash} failed its MD4 check'
-            raise HashMismatchError(err_msg, part=part)
+        if failed:
+            err_msg = f'part {part} of {self.file_hash} failed its hash check in {len(failed)} blocks'
+            raise HashMismatchError(err_msg, part=part, bad_blocks=tuple(block.start for block in bad))
+        if aich is not None and not checked:
+            logger.warning(
+                'Part %d of %s passed on its MD4 alone, no peer having served its AICH hashes', part, self.name
+            )
 
         self.verified_parts.add(part)
         self.save()

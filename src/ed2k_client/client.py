@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+from ed2k_client.aich import AichTree
 from ed2k_client.constants import DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, Protocol
 from ed2k_client.download import Downloader, DownloadSettings
 from ed2k_client.errors import (
@@ -609,6 +610,8 @@ class Client:
             file_hash=link.file_hash,
             read_chunk=self.config.io.read_chunk,
         )
+        if link.aich_root is not None:
+            part_file.aich = AichTree(size=link.size, root=link.aich_root)
         downloader = Downloader(
             part_file=part_file,
             local=self._local,

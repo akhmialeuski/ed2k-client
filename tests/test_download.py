@@ -9,10 +9,10 @@ import pytest
 
 from ed2k_client.constants import PeerOp, Protocol
 from ed2k_client.download import Downloader, DownloadSettings
-from ed2k_client.errors import DownloadError
+from ed2k_client.errors import DownloadError, HashMismatchError
 from ed2k_client.hashing import Ed2kHash, md4
 from ed2k_client.identity import Identity
-from ed2k_client.partfile import PartFile
+from ed2k_client.partfile import PartFile, blocks_of_part
 from ed2k_client.peer import LocalPeer, build_hello
 from ed2k_client.security import AddressPolicy
 from ed2k_client.sources import Source, client_id_from_host
@@ -21,6 +21,8 @@ from tests.fakes import ScriptedStream
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
+
+pytestmark = pytest.mark.usefixtures('fs')
 
 CONNECT = 'ed2k_client.download.PacketStream.connect'
 WRITE = 'ed2k_client.partfile.PartFile.write'
@@ -33,6 +35,11 @@ FILE_HASH = Ed2kHash(md4(b'book'))
 SIZE = 5_000_000
 PUBLIC_PEER = ('8.8.8.8', 4662)
 SOURCE = Source(client_id=client_id_from_host(PUBLIC_PEER[0]), port=PUBLIC_PEER[1])
+OTHER_SOURCE = Source(client_id=client_id_from_host('1.1.1.1'), port=PUBLIC_PEER[1])
+SOURCE_KEY = (SOURCE.client_id, SOURCE.port)
+OTHER_KEY = (OTHER_SOURCE.client_id, OTHER_SOURCE.port)
+BAD_PART = 'part 0 failed its hash check in 1 blocks'
+NO_SINGLE_PEER = 'no single peer'
 LOCAL = LocalPeer(identity=Identity.generate(), client_id=0, tcp_port=0, nickname='leecher')
 UPLOADER = LocalPeer(identity=Identity.generate(), client_id=0, tcp_port=0, nickname='uploader')
 SETTINGS = DownloadSettings(max_connect_failures=3)
@@ -59,7 +66,6 @@ FIRST_DATA = Packet(
 class TestWork:
     """Tests of how :class:`Downloader` schedules a source after one session with it."""
 
-    @pytest.mark.usefixtures('fs')
     @patch(CONNECT, new_callable=AsyncMock)
     async def test_session_ended_by_the_uploader_keeps_the_source(self, connect: AsyncMock) -> None:
         """A source whose sessions end with ``OP_OUTOFPARTREQS`` is asked again later and never banned.
@@ -83,10 +89,39 @@ class TestWork:
         assert (state.banned, state.failures) == (False, 0)
 
 
+class TestStore:
+    """Tests of how :class:`Downloader` blames the senders of a part that failed its hashes."""
+
+    @patch(WRITE, autospec=True)
+    def test_innocent_peer_that_completes_a_part_logs_only_the_ban(
+        self, write: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """When AICH convicts another peer, the log names the ban and never says that no single peer is to blame.
+
+        The peer whose block completes the part is not always the one that broke it, and a log that bans one peer and
+        then reports nobody to blame leaves the reader unable to tell what happened.
+
+        :param write: the mocked part file write, which fails the part on the honest peer's block.
+        :type write: MagicMock
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        part_file = PartFile.open(directory=QUARANTINE, name=BOOK, size=SIZE, file_hash=FILE_HASH)
+        downloader = Downloader(part_file=part_file, local=LOCAL, policy=AddressPolicy(), settings=SETTINGS)
+        downloader.add_sources([SOURCE, OTHER_SOURCE])
+        broken, completing = blocks_of_part(size=SIZE, part=0)[:2]
+        write.side_effect = [None, HashMismatchError(BAD_PART, part=0, bad_blocks=(broken.start,))]
+
+        downloader._store(block=broken, offset=broken.start, data=bytes(DATA_BYTES), key=SOURCE_KEY)
+        downloader._store(block=completing, offset=completing.start, data=bytes(DATA_BYTES), key=OTHER_KEY)
+
+        assert (downloader._sources[SOURCE_KEY].banned, downloader._sources[OTHER_KEY].banned) == (True, False)
+        assert NO_SINGLE_PEER not in caplog.text
+
+
 class TestRun:
     """Tests of :meth:`Downloader.run`."""
 
-    @pytest.mark.usefixtures('fs')
     @patch(WRITE, autospec=True, side_effect=DISK_FULL)
     @patch(CONNECT, new_callable=AsyncMock)
     async def test_disk_error_fails_the_download_after_one_session(self, connect: AsyncMock, write: MagicMock) -> None:

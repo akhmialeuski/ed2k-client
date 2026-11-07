@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 # The tree a live eD2k server (ed2k-rust, 85.17.116.222:6082) answered with 300 results on 2026-11-06.
 LIVE_TREE_HEX = '0000010800737072696e6765720001020300706466010004020400646a7675010004'
 SAMPLE_HASH = Ed2kHash.from_hex('E737E3459E12C22118C48306FAE1D8EB')
+AICH_ROOT = bytes(range(20))
+AICH_ROOT_TEXT = 'AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQT'
+# base64 refuses text that is not ASCII with a plain ValueError rather than binascii.Error
+NON_ASCII_ROOT_LINK = 'ed2k://|file|a|5|E737E3459E12C22118C48306FAE1D8EB|h=\u00c4AAQEAYEAUDAOCAJBIFQYDIOB4IBCEQT|/'
 BOOK = 'book.pdf'
 FIRST_SERVER = '203.0.113.10:4661'
 SECOND_SERVER = '203.0.113.20:4242'
@@ -256,17 +260,26 @@ class TestLinkParse:
 
     def test_file_link_round_trip_and_rejections(self) -> None:
         """A file link parses and formats back, and malformed links are refused."""
-        text = 'ed2k://|file|A%20Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|h=ABCDEF|/'
+        text = f'ed2k://|file|A%20Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|h={AICH_ROOT_TEXT}|/'
         link = FileLink.parse(text)
 
         assert (link.name, link.size, link.file_hash, link.aich_root) == (
             'A Book.pdf',
             5_648_714,
             SAMPLE_HASH,
-            'ABCDEF',
+            AICH_ROOT,
         )
         assert str(link) == text
-        for bad in ('http://x', 'ed2k://|file|a|0|E737E3459E12C22118C48306FAE1D8EB|/', 'ed2k://|file|a|5|zz|/'):
+        assert FileLink.parse(text.replace(AICH_ROOT_TEXT, AICH_ROOT_TEXT.lower())).aich_root == AICH_ROOT
+        bad_links = (
+            'http://x',
+            'ed2k://|file|a|0|E737E3459E12C22118C48306FAE1D8EB|/',
+            'ed2k://|file|a|5|zz|/',
+            'ed2k://|file|a|5|E737E3459E12C22118C48306FAE1D8EB|h=ABCDEF|/',
+            'ed2k://|file|a|5|E737E3459E12C22118C48306FAE1D8EB|h=!!!!!!!!|/',
+            NON_ASCII_ROOT_LINK,
+        )
+        for bad in bad_links:
             with pytest.raises(ProtocolError):
                 FileLink.parse(bad)
         assert str(ServerLink.parse(SERVER_LINK)) == SERVER_LINK

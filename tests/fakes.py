@@ -1,9 +1,10 @@
-"""In-process stand-ins for an eD2k server and a Kad network that speak the real wire format over loopback.
+"""In-process stand-ins for an eD2k server, a seeding peer and a Kad network that speak the real wire format.
 
 The fake server evaluates the binary search tree it receives against its index, so a search test also checks the
 semantics of the encoded query, and it sends its result pages zlib-packed the way Lugdunum servers do. The fake Kad
 nodes answer only when the receiver ID in ``KADEMLIA2_REQ`` is theirs and search only inside the 2^120 tolerance
-zone, the two checks a real aMule node makes.
+zone, the two checks a real aMule node makes. The fake peer answers AICH requests, which the client's own serving side
+does not, so it stands in for an eMule seeder in the AICH tests.
 
 The scripted stream stands in for one :class:`PacketStream` in unit tests. ``create_autospec`` cannot read the
 signatures of :class:`PacketStream`, because its annotations name imports that exist only for type checkers.
@@ -18,17 +19,31 @@ import zlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
-from ed2k_client.constants import CryptOption, FileTag, KadOp, Protocol, SearchOperator, ServerOp, ServerTcpFlag
+from ed2k_client.constants import (
+    AICH_HASH_LENGTH,
+    ClientTag,
+    CryptOption,
+    EmuleOp,
+    FileTag,
+    KadOp,
+    PeerOp,
+    Protocol,
+    SearchOperator,
+    ServerOp,
+    ServerTcpFlag,
+)
 from ed2k_client.errors import ConnectionFailedError, ProtocolError
 from ed2k_client.hashing import Ed2kHash, md4
 from ed2k_client.kad.contacts import KadId
+from ed2k_client.peer import AICH_SHIFT, PartRequest
 from ed2k_client.search import BooleanOperator, SearchNodeKind
 from ed2k_client.servermet import ServerEntry
 from ed2k_client.settings import DEFAULT_LIMITS
-from ed2k_client.sources import client_id_from_host
+from ed2k_client.sources import Source, SourceOrigin, client_id_from_host
 from ed2k_client.tags import Tag, int_value, read_tags, str_value, tag_map, write_tags
 from ed2k_client.transport import PacketStream, StreamOptions
 from ed2k_client.wire import Reader, Writer, decode_udp, encode_udp
+from tests.helpers import recovery_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -36,6 +51,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from ed2k_client.errors import Ed2kError
+    from ed2k_client.hashing import FileHashes
     from ed2k_client.wire import Packet
 
 LOOPBACK = '127.0.0.1'
@@ -49,6 +65,8 @@ TYPE_MASK = 0x1F
 DOCUMENT_TYPE = 'Doc'
 DOCUMENT_EXTENSIONS = ('.pdf', '.djvu')
 SERVER_SIDE = StreamOptions(idle_timeout=None)
+PEER_NAME = 'fake peer'
+PEER_USER_HASH = bytes(range(16))
 COMPARATORS = {
     SearchOperator.EQUAL: operator.eq,
     SearchOperator.GREATER: operator.gt,
@@ -383,6 +401,183 @@ class FakeServer:
         )
 
 
+class FakePeer:
+    """A High ID seeder of one file on loopback that answers AICH requests from a tree it is given.
+
+    It speaks the part of the client to client protocol the downloader uses, with 32-bit offsets only.
+
+    :ivar data: the content it serves.
+    :ivar hashes: the eD2k hashes it announces for the content.
+    :ivar aich: the AICH tree it serves for whatever root it is asked about, or ``None`` for a peer that neither
+        announces nor answers AICH.
+    :ivar corrupt: whether it flips every byte it sends.
+    :ivar aich_requests: the parts it was asked AICH hashes for, in order.
+    :ivar served: bytes of data sent.
+    :ivar port: the TCP port it listens on, 0 until it starts.
+    """
+
+    def __init__(
+        self, data: bytes, *, hashes: FileHashes, aich: dict[int, bytes] | None, corrupt: bool = False
+    ) -> None:
+        """Prepare the peer.
+
+        :param data: the content it serves.
+        :type data: bytes
+        :param hashes: the eD2k hashes it announces for the content.
+        :type hashes: FileHashes
+        :param aich: the AICH tree it serves, or ``None`` for a peer without AICH.
+        :type aich: dict[int, bytes] | None
+        :param corrupt: whether it flips every byte it sends.
+        :type corrupt: bool
+        """
+        self.data = data
+        self.hashes = hashes
+        self.aich = aich
+        self.corrupt = corrupt
+        self.aich_requests: list[int] = []
+        self.served = 0
+        self._server: asyncio.Server | None = None
+        self.port = 0
+
+    async def __aenter__(self) -> Self:
+        """Start listening on a free loopback port.
+
+        :returns: the peer.
+        :rtype: Self
+        """
+        self._server = await asyncio.start_server(self._handle, LOOPBACK, 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
+    ) -> None:
+        """Stop listening and drop every connection.
+
+        :param exc_type: the exception type, if any.
+        :type exc_type: type[BaseException] | None
+        :param exc: the exception, if any.
+        :type exc: BaseException | None
+        :param traceback: the traceback, if any.
+        :type traceback: TracebackType | None
+        """
+        if self._server is not None:
+            self._server.close()
+            self._server.close_clients()
+            await self._server.wait_closed()
+
+    @property
+    def source(self) -> Source:
+        """The peer as a source a link names."""
+        return Source(
+            client_id=client_id_from_host(LOOPBACK), port=self.port, crypt=CryptOption(0), origin=SourceOrigin.LINK
+        )
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Answer one downloader until it disconnects.
+
+        :param reader: the connection reader.
+        :type reader: asyncio.StreamReader
+        :param writer: the connection writer.
+        :type writer: asyncio.StreamWriter
+        """
+        stream = PacketStream(reader=reader, writer=writer, options=SERVER_SIDE)
+        try:
+            while True:
+                await self._answer(stream, await stream.read_packet())
+        except ConnectionFailedError, ProtocolError:
+            pass
+        finally:
+            await stream.close()
+
+    async def _answer(self, stream: PacketStream, packet: Packet) -> None:
+        """Answer one request.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param packet: the request.
+        :type packet: Packet
+        """
+        reader = packet.reader()
+        match (packet.protocol, packet.opcode):
+            case (Protocol.EDONKEY, PeerOp.HELLO):
+                await stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.HELLOANSWER, payload=self._hello())
+            case (Protocol.EDONKEY, PeerOp.REQUESTFILENAME | PeerOp.SETREQFILEID | PeerOp.HASHSETREQUEST):
+                await self._answer_file_query(stream, packet.opcode)
+            case (Protocol.EDONKEY, PeerOp.STARTUPLOADREQ):
+                await stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.ACCEPTUPLOADREQ)
+            case (Protocol.EDONKEY, PeerOp.REQUESTPARTS):
+                await self._send_parts(stream, PartRequest.parse(reader, large=False))
+            case (Protocol.EMULE, EmuleOp.AICHREQUEST):
+                await self._answer_aich(stream, reader)
+            case _:
+                pass
+
+    def _hello(self) -> bytes:
+        """Build the hello answer, announcing AICH when the peer has a tree.
+
+        :returns: the payload.
+        :rtype: bytes
+        """
+        options = int(self.aich is not None) << AICH_SHIFT
+        hello = Writer().raw(PEER_USER_HASH).u32(client_id_from_host(LOOPBACK)).u16(self.port)
+        write_tags(hello, [Tag(ClientTag.NAME, PEER_NAME), Tag(ClientTag.EMULE_MISCOPTIONS1, options)])
+        return hello.u32(0).u16(0).getvalue()
+
+    async def _answer_file_query(self, stream: PacketStream, opcode: int) -> None:
+        """Answer a file name, file status or hashset request for the one file the peer has.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param opcode: the request opcode.
+        :type opcode: int
+        """
+        answer = Writer().raw(self.hashes.file_hash.digest)
+        if opcode == PeerOp.REQUESTFILENAME:
+            reply = PeerOp.REQFILENAMEANSWER
+            answer.string(PEER_NAME)
+        elif opcode == PeerOp.SETREQFILEID:
+            reply = PeerOp.FILESTATUS
+            answer.u16(0)
+        else:
+            reply = PeerOp.HASHSETANSWER
+            answer.u16(len(self.hashes.part_hashes)).raw(b''.join(self.hashes.part_hashes))
+        await stream.send(protocol=Protocol.EDONKEY, opcode=reply, payload=answer.getvalue())
+
+    async def _send_parts(self, stream: PacketStream, request: PartRequest) -> None:
+        """Send the requested ranges as raw data packets, spoiled when the peer corrupts.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param request: the block request.
+        :type request: PartRequest
+        """
+        for start, end in request.ranges:
+            chunk = self.data[start:end]
+            if self.corrupt:
+                chunk = bytes(byte ^ 0xFF for byte in chunk)
+            self.served += len(chunk)
+            payload = Writer().raw(self.hashes.file_hash.digest).u32(start).u32(end).raw(chunk).getvalue()
+            await stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.SENDINGPART, payload=payload)
+
+    async def _answer_aich(self, stream: PacketStream, reader: Reader) -> None:
+        """Answer an AICH request with the recovery hashes of the part, or refuse it without a tree.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param reader: the request payload.
+        :type reader: Reader
+        """
+        # The root asked about is echoed, so a peer given another tree forges hashes for the right root
+        reader.hash16()
+        part, root = reader.u16(), reader.take(AICH_HASH_LENGTH)
+        self.aich_requests.append(part)
+        answer = Writer().raw(self.hashes.file_hash.digest)
+        if self.aich is not None:
+            answer.u16(part).raw(root).raw(recovery_data(self.aich, size=len(self.data), part=part))
+        await stream.send(protocol=Protocol.EMULE, opcode=EmuleOp.AICHANSWER, payload=answer.getvalue())
+
+
 def write_contact(writer: Writer, *, kad_id: KadId, host: str, udp_port: int) -> None:
     """Append the 25-byte Kad contact record.
 
@@ -657,6 +852,7 @@ class ScriptedStream:
     :ivar peer: the remote address.
     :ivar limits: the caps of the connection.
     :ivar closed: whether the connection was closed through its context.
+    :ivar sent: the ``(protocol, opcode, payload)`` of every packet the stream accepted.
     """
 
     def __init__(
@@ -674,6 +870,7 @@ class ScriptedStream:
         self.peer = peer
         self.limits = DEFAULT_LIMITS
         self.closed = False
+        self.sent: list[tuple[int, int, bytes]] = []
         self._packets = list(packets)
         self._send_error = send_error
 
@@ -693,7 +890,7 @@ class ScriptedStream:
         raise ConnectionFailedError(err_msg)
 
     async def send(self, *, protocol: int, opcode: int, payload: bytes = b'') -> None:
-        """Accept a packet and drop it, or fail as the stream was told to.
+        """Record a packet, or fail as the stream was told to.
 
         :param protocol: the namespace byte.
         :type protocol: int
@@ -703,9 +900,9 @@ class ScriptedStream:
         :type payload: bytes
         :raises Ed2kError: the send error the stream was given.
         """
-        del protocol, opcode, payload
         if self._send_error is not None:
             raise self._send_error
+        self.sent.append((protocol, opcode, payload))
 
     async def __aenter__(self) -> Self:
         """Enter the context.

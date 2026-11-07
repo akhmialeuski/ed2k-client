@@ -13,7 +13,9 @@ import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
+from ed2k_client.aich import read_recovery
 from ed2k_client.constants import (
+    AICH_HASH_LENGTH,
     BLOCK_SIZE,
     EDONKEY_VERSION,
     HASH_LENGTH,
@@ -56,6 +58,8 @@ NO_SERVER: tuple[str, int] = ('0.0.0.0', 0)
 MISC_OPTIONS_1: int = 1 << 28 | 1 << 20 | 1 << 2
 COMPRESSION_SHIFT: int = 20
 VERSION_MASK: int = 0xF
+AICH_SHIFT: int = 29
+AICH_MASK: int = 0x7
 MISC_OPTIONS_2: int = 1 << 4 | 1 << 7
 
 DATA_OPCODES: frozenset[tuple[int, int]] = frozenset(
@@ -82,6 +86,7 @@ class HelloInfo:
     :ivar port: its TCP port.
     :ivar name: its user name, untrusted.
     :ivar compression: whether it accepts zlib-compressed blocks.
+    :ivar aich: whether it answers requests for AICH hashes.
     """
 
     user_hash: bytes
@@ -89,6 +94,7 @@ class HelloInfo:
     port: int
     name: str
     compression: bool = False
+    aich: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,14 +227,16 @@ def parse_hello(reader: Reader, *, answer: bool) -> HelloInfo:
     user_hash, client_id, port = reader.hash16(), reader.u32(), reader.u16()
     tags = tag_map(read_tags(reader))
 
-    # The compression version sits in bits 20 to 23 of the first option tag: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L547
-    compression_version = int_value(tags, ClientTag.EMULE_MISCOPTIONS1) >> COMPRESSION_SHIFT & VERSION_MASK
+    # The compression version sits in bits 20 to 23 of the first option tag and the AICH version in bits 29 to 31:
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L544
+    options = int_value(tags, ClientTag.EMULE_MISCOPTIONS1)
     return HelloInfo(
         user_hash=user_hash,
         client_id=client_id,
         port=port,
         name=str_value(tags, ClientTag.NAME),
-        compression=compression_version > 0,
+        compression=options >> COMPRESSION_SHIFT & VERSION_MASK > 0,
+        aich=options >> AICH_SHIFT & AICH_MASK > 0,
     )
 
 
@@ -422,6 +430,40 @@ class PeerConnection:
             err_msg = f'hashset of {count} parts'
             raise ProtocolError(err_msg)
         return [reader.hash16() for _ in range(count)]
+
+    async def request_aich(self, *, file_hash: Ed2kHash, part: int, root: bytes, count: int) -> dict[int, bytes] | None:
+        """Ask the peer for the AICH hashes that prove one part against the root.
+
+        aMule answers at once and in any state of the connection, but only for a complete file whose root is the
+        one asked about, and otherwise sends the file hash alone:
+        https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/DownloadClient.cpp#L1666
+
+        :param file_hash: the file.
+        :type file_hash: Ed2kHash
+        :param part: the part.
+        :type part: int
+        :param root: the trusted AICH root.
+        :type root: bytes
+        :param count: how many hashes the answer for this part carries.
+        :type count: int
+        :returns: the hashes by node identifier, not yet proven, or ``None`` when the peer has none for this root.
+        :rtype: dict[int, bytes] | None
+        :raises ProtocolError: when the answer is about another file, part or root, or breaks the layout.
+        """
+        payload = Writer().raw(file_hash.digest).u16(part).raw(root).getvalue()
+        await self.stream.send(protocol=Protocol.EMULE, opcode=EmuleOp.AICHREQUEST, payload=payload)
+        reader = (await self._next({(Protocol.EMULE, EmuleOp.AICHANSWER)})).reader()
+
+        # One request is in flight on a connection that serves one file, so any other answer is not one of ours
+        if Ed2kHash(reader.hash16()) != file_hash:
+            err_msg = f'{self.stream.peer} sent AICH hashes of another file'
+            raise ProtocolError(err_msg)
+        if not reader.remaining:
+            return None
+        if reader.u16() != part or reader.take(AICH_HASH_LENGTH) != root:
+            err_msg = f'{self.stream.peer} sent AICH hashes of another part or root'
+            raise ProtocolError(err_msg)
+        return read_recovery(reader, count=count)
 
     async def request_upload(self, file_hash: Ed2kHash, *, queue_wait: float) -> None:
         """Ask for an upload slot and wait on the connection while queued.

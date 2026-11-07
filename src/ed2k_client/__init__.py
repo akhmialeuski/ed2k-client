@@ -1,12 +1,13 @@
 """Python client for the eDonkey2000 (eD2k) and Kad networks: connect, search, download and share."""
 
 from ed2k_client.client import Client, ClientConfig, ClientStatus, ServerStatus
-from ed2k_client.download import ContentPolicy, DownloadProgress, DownloadResult, DownloadSettings
+from ed2k_client.download import AichPolicy, ContentPolicy, DownloadProgress, DownloadResult, DownloadSettings
 from ed2k_client.errors import (
     ConnectionFailedError,
     DownloadError,
     Ed2kError,
     HashMismatchError,
+    LinkMismatchError,
     NotConnectedError,
     ProtocolError,
     SecurityError,
@@ -21,6 +22,7 @@ from ed2k_client.settings import IoSettings, KadSettings, Limits, PeerSettings, 
 from ed2k_client.sources import Source
 
 __all__ = [
+    'AichPolicy',
     'Client',
     'ClientConfig',
     'ClientStatus',
@@ -41,6 +43,7 @@ __all__ = [
     'IoSettings',
     'KadSettings',
     'Limits',
+    'LinkMismatchError',
     'NotConnectedError',
     'PeerSettings',
     'ProtocolError',

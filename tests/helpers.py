@@ -1,13 +1,17 @@
 """Shared helpers of the tests: configs, payloads, server lists, sources and spies on what a seeder serves."""
 
+import itertools
 import random
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from Crypto.Hash import SHA1
+
 from ed2k_client import ClientConfig, DownloadSettings, SecurityError, Source
-from ed2k_client.constants import CryptOption
+from ed2k_client.aich import AichNode, combine
+from ed2k_client.constants import PART_SIZE, CryptOption
 from ed2k_client.servermet import SERVER_NAME_TAG, USERS_TAG
 from ed2k_client.share import SharedFile
 from ed2k_client.sources import SourceOrigin, client_id_from_host
@@ -43,6 +47,74 @@ def server_met(servers: Sequence[ServerEntry]) -> bytes:
     for server in servers:
         writer.ed2k_ip(server.host).u16(server.port)
         write_tags(writer, [Tag(SERVER_NAME_TAG, server.name), Tag(USERS_TAG, server.users)])
+    return writer.getvalue()
+
+
+def aich_tree(data: bytes) -> dict[int, bytes]:
+    """Hash every node of a file's AICH tree, as a seeder holding the whole file knows it.
+
+    :param data: the file content.
+    :type data: bytes
+    :returns: the hashes by node identifier.
+    :rtype: dict[int, bytes]
+    """
+    hashes: dict[int, bytes] = {}
+
+    def walk(node: AichNode) -> bytes:
+        """Hash a node from its block or its children.
+
+        :param node: the node.
+        :type node: AichNode
+        :returns: its hash.
+        :rtype: bytes
+        """
+        if node.leaf:
+            digest = SHA1.new(data[node.start : node.start + node.size]).digest()
+        else:
+            left, right = node.children()
+            digest = combine(walk(left), walk(right))
+        hashes[node.ident] = digest
+        return digest
+
+    walk(AichNode.root(len(data)))
+    return hashes
+
+
+def recovery_data(hashes: dict[int, bytes], *, size: int, part: int, wide: bool = False) -> bytes:
+    """Write the recovery hashes of one part in the order and layout aMule's CreatePartRecoveryData uses.
+
+    :param hashes: every hash of the tree.
+    :type hashes: dict[int, bytes]
+    :param size: the file size.
+    :type size: int
+    :param part: the part index.
+    :type part: int
+    :param wide: whether to use the 32-bit identifiers of files over 4 GB.
+    :type wide: bool
+    :returns: the hash count and the hashes, without the file hash, part and root that precede them.
+    :rtype: bytes
+    """
+    start = part * PART_SIZE
+    path = AichNode.root(size).path_to(start=start, size=min(PART_SIZE, size - start))
+
+    # The sibling of each node on the way down comes first, then the blocks of the part from left to right
+    entries = []
+    for parent, child in itertools.pairwise(path):
+        left, right = parent.children()
+        sibling = right if child == left else left
+        entries.append(sibling.ident)
+    entries.extend(leaf.ident for leaf in path[-1].leaves())
+
+    writer = Writer()
+    if wide:
+        writer.u16(0).u16(len(entries))
+    else:
+        writer.u16(len(entries))
+    for ident in entries:
+        (writer.u32 if wide else writer.u16)(ident)
+        writer.raw(hashes[ident])
+    if not wide:
+        writer.u16(0)
     return writer.getvalue()
 
 

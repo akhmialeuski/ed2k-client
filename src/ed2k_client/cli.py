@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ed2k_client.client import Client, ClientConfig
-from ed2k_client.download import ContentPolicy
+from ed2k_client.download import AichPolicy, ContentPolicy
 from ed2k_client.errors import Ed2kError
 from ed2k_client.hashing import hash_file
 from ed2k_client.links import FileLink, ServerLink
@@ -87,6 +87,8 @@ def _apply_command_flags(config: ClientConfig, arguments: argparse.Namespace) ->
         download = replace(download, content_policy=ContentPolicy.ANY)
     if getattr(arguments, 'documents_only', False):
         download = replace(download, content_policy=ContentPolicy.DOCUMENTS)
+    if getattr(arguments, 'allow_md4_only', False):
+        download = replace(download, aich=AichPolicy.PREFER)
     if (hours := getattr(arguments, 'deadline_hours', None)) is not None:
         download = replace(download, deadline=hours * SECONDS_PER_HOUR)
     if (peers := getattr(arguments, 'max_peers', None)) is not None:
@@ -302,6 +304,11 @@ def build_parser() -> argparse.ArgumentParser:
     content = download.add_mutually_exclusive_group()
     content.add_argument('--documents-only', action=FLAG, help='release only PDF and DjVu files without active content')
     content.add_argument('--any-content', action=FLAG, help='release every file, programs included')
+    download.add_argument(
+        '--allow-md4-only',
+        action=FLAG,
+        help='accept a part on its MD4 alone when the link has an AICH root but no peer serves the AICH hashes',
+    )
     download.add_argument('--deadline-hours', type=float, help='give up after this many hours')
     download.add_argument('--max-peers', type=int, help='sources downloaded from at the same time')
     download.set_defaults(handler=_download)

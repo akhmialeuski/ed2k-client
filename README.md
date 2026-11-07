@@ -116,7 +116,8 @@ ed2k://|server|ip|port|/` picks a single server, `--server-met` reads the server
 takes any free TCP port before the login and announces the port it got, and `--connect-timeout` and `--read-timeout`
 set the connection timeouts. `download` accepts several
 links and fetches them concurrently with one identity, `--documents-only` narrows what leaves quarantine to PDF
-and DjVu and `--any-content` widens it to everything, `--deadline-hours` and `--max-peers` bound each download, and
+and DjVu and `--any-content` widens it to everything, `--allow-md4-only` accepts a part on its MD4 when no peer
+serves the AICH hashes the link's root calls for, `--deadline-hours` and `--max-peers` bound each download, and
 `share` takes `--upload-slots`.
 
 ## Design
@@ -139,8 +140,9 @@ accept raw or zlib-compressed blocks, and verify every 9,728,000-byte part again
 the client is asked again after 21.7 minutes at the earliest, as eMule's `FILEREASKTIME`, because eMule bans clients
 that ask more often than every ten minutes. A peer that ends an upload session, as aMule and eMule do after 10 MiB or
 an hour while others wait, has queued the client again and is asked again the same way, never counted as a failure.
-A part that fails its hash convicts its peer only when that peer alone delivered it. A part with several contributors
-is fetched again from one peer, so the next failure is unambiguous.
+Without AICH, a part that fails its hash convicts its peer only when that peer alone delivered it, and a part with
+several contributors is fetched again from one peer, so the next failure is unambiguous. With AICH, the failed 180 KiB
+blocks are known, so only they are fetched again and only the peer that wrote one of them is banned.
 
 ## Defences
 
@@ -164,10 +166,9 @@ Everything that arrives from the network is untrusted, and these are the defence
 - Downloaded data stays in quarantine until its eD2k hash and every part hash match, and a part that matched is never
   written again: a peer sending data for it is banned. The content is then classified by its magic bytes, and
   `download.content_policy` decides what leaves quarantine. `safe`, the default, releases files of any kind except
-  programs, scripts and Office documents that may carry macros. `documents` (`--documents-only`) releases only PDF
-  and DjVu.
-  `any` (`--any-content`) releases everything and only records the verdict. Under the first two, a PDF is refused when
-  its dictionaries carry `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm`
+  programs, scripts and Office documents that may carry macros. `documents` (`--documents-only`) releases only PDF and
+  DjVu. `any` (`--any-content`) releases everything and only records the verdict. Under the first two, a PDF is refused
+  when its dictionaries carry `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm`
   (hex-escaped names included), outside its strings, comments and stream bodies. An object header inside a stream body
   ends it for the scan, because a reader reaches an object by its xref offset wherever it lies. Under the first two, a
   file is also refused when the name it is released under has an extension on the list of [file types Outlook
@@ -176,6 +177,14 @@ Everything that arrives from the network is untrusted, and these are the defence
   `.pdf` without a PDF header in its first kilobyte. A ZIP is refused when it holds an Office macro project or a Java
   manifest. Other archives pass `safe` as notable, because their other members are not inspected. Released files are
   mode 0600, never executable.
+- A link that carries an AICH root (`h=`) adds a SHA-1 check of every 180 KiB block, which defeats a part forged to
+  collide with the original MD4. Complete sources that announce AICH are asked for the block hashes of each part,
+  and an answer counts only when it folds back to the root of the link, so a peer cannot forge it. Under
+  `download.aich = 'require'`, the default, a part is not fetched until its block hashes are proven, and a file no
+  complete AICH source serves runs into the deadline with the waiting parts named. `prefer` (`--allow-md4-only`)
+  fetches every part and accepts one on its MD4 alone, with a warning, when no peer served its hashes. A part whose
+  blocks all match the root but whose MD4 fails ends the download, because the link names two different files. Only
+  the root of a link is used, never one a peer or a server reports.
 - Sharing is off until `share()` is called. Peers name files only by hash, symbolic links are not shared, and a
   file changed or deleted on disk after hashing is withdrawn instead of served.
 - Kad answers are accepted only from a node the client is waiting on for that opcode, which drops forged answers.
@@ -206,6 +215,6 @@ uv run pre-commit run --all-files --config PoCs/ed2k-client/.pre-commit-config.y
 
 The client is a Low ID client when its TCP port is not reachable from the internet. It can then download only from
 High ID peers and be reached only through a server callback, because Kad buddies and NAT traversal are not
-implemented. It does not implement AICH, source exchange, server UDP queries, Kad publishing, Secure User
-Identification or the obfuscated server connection. Some servers accept a login and still ignore searches. On
-2026-11-06 eMule Sunrise did so while ed2k-rust answered.
+implemented. It does not serve AICH hashes to other peers, and does not implement source exchange, server UDP
+queries, Kad publishing, Secure User Identification or the obfuscated server connection. Some servers accept a
+login and still ignore searches. On 2026-11-06 eMule Sunrise did so while ed2k-rust answered.

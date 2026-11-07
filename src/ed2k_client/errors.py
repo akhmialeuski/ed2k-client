@@ -34,18 +34,26 @@ class DownloadError(Ed2kError):
 
 
 class HashMismatchError(DownloadError):
-    """A downloaded part does not match its eD2k part hash.
+    """A downloaded part does not match its eD2k part hash or the AICH hashes of its blocks.
 
     :ivar part: the index of the part that failed.
+    :ivar bad_blocks: start offsets of the blocks AICH proved wrong, empty when the part failed as a whole.
     """
 
-    def __init__(self, message: str, *, part: int) -> None:
-        """Record which part failed.
+    def __init__(self, message: str, *, part: int, bad_blocks: tuple[int, ...] = ()) -> None:
+        """Record which part and which of its blocks failed.
 
         :param message: the description.
         :type message: str
         :param part: the index of the part that failed.
         :type part: int
+        :param bad_blocks: start offsets of the blocks AICH proved wrong.
+        :type bad_blocks: tuple[int, ...]
         """
         super().__init__(message)
         self.part = part
+        self.bad_blocks = bad_blocks
+
+
+class LinkMismatchError(DownloadError):
+    """The AICH root and the eD2k hash of a link describe different content, so no source can complete the file."""

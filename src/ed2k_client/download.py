@@ -3,9 +3,10 @@
 Each source gets a worker that runs the peer protocol of :mod:`ed2k_client.peer`. A shared set of blocks in flight
 keeps two peers from fetching the same block. A peer that queues this client is asked again after the reask
 interval only, because aMule bans a client that asks again within ``MIN_REQUESTTIME``, 590 seconds, four times.
-A peer whose data fails a part hash or the protocol is banned for the rest of the download. When every part is
-verified, the content is inspected by :func:`check_document` and only a safe document of an expected kind leaves
-quarantine.
+A peer whose data fails a part hash or the protocol is banned for the rest of the download. When the link carries an
+AICH root, complete sources are asked for the AICH hashes of the parts, which pin a failed part on the blocks and the
+peer that broke it. When every part is verified, the content is inspected by :func:`check_document` and only a safe
+document of an expected kind leaves quarantine.
 
 A Low ID source cannot be dialled. This client reaches only High ID sources, which is the whole network a Low ID
 client can use without a server callback or a Kad buddy.
@@ -20,7 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ed2k_client.constants import LARGE_FILE_THRESHOLD
-from ed2k_client.errors import ConnectionFailedError, DownloadError, HashMismatchError, ProtocolError
+from ed2k_client.errors import (
+    ConnectionFailedError,
+    DownloadError,
+    HashMismatchError,
+    LinkMismatchError,
+    ProtocolError,
+)
 from ed2k_client.peer import PeerConnection, QueuedError
 from ed2k_client.security import (
     DocumentKind,
@@ -35,7 +42,7 @@ from ed2k_client.transport import PEER_STREAM, PacketStream
 
 if TYPE_CHECKING:
     from ed2k_client.partfile import Block, PartFile
-    from ed2k_client.peer import LocalPeer
+    from ed2k_client.peer import FileStatus, HelloInfo, LocalPeer
     from ed2k_client.security import (
         AddressPolicy,
         Inspection,
@@ -65,6 +72,19 @@ class ContentPolicy(StrEnum):
     ANY = 'any'
 
 
+class AichPolicy(StrEnum):
+    """What the AICH root of a link demands before a part is accepted.
+
+    ``REQUIRE``, the default, fetches a part only once a peer has served the AICH hashes that prove its blocks, so a
+    part whose MD4 collides with the original cannot pass, and a file no complete AICH source serves runs into the
+    deadline. ``PREFER`` fetches every part and accepts one on its MD4 alone, with a warning, when no peer served its
+    AICH hashes. A link without a root is checked by MD4 under either policy.
+    """
+
+    REQUIRE = 'require'
+    PREFER = 'prefer'
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadSettings:
     """Limits of one download.
@@ -76,6 +96,7 @@ class DownloadSettings:
     :ivar source_refresh: seconds between two refreshes of the source list.
     :ivar deadline: seconds after which the download gives up.
     :ivar content_policy: which finished files may leave quarantine.
+    :ivar aich: what the AICH root of a link demands before a part is accepted.
     :ivar poll_interval: seconds between two rounds of starting workers and reporting progress.
     :ivar max_connect_failures: failed connections in a row after which a source is dropped.
     """
@@ -87,6 +108,7 @@ class DownloadSettings:
     source_refresh: float = 900.0
     deadline: float = 6 * SECONDS_PER_HOUR
     content_policy: ContentPolicy = ContentPolicy.SAFE
+    aich: AichPolicy = AichPolicy.REQUIRE
     poll_interval: float = 1.0
     max_connect_failures: int = 3
 
@@ -166,7 +188,7 @@ class Downloader:
     _sources: dict[SourceKey, SourceState] = field(default_factory=dict)
     _in_flight: set[Block] = field(default_factory=set)
     _workers: dict[SourceKey, asyncio.Task[None]] = field(default_factory=dict)
-    _contributors: dict[int, set[SourceKey]] = field(default_factory=dict)
+    _senders: dict[int, dict[int, set[SourceKey]]] = field(default_factory=dict)
     _exclusive: dict[int, SourceKey | None] = field(default_factory=dict)
     _failure: BaseException | None = None
 
@@ -220,15 +242,17 @@ class Downloader:
         # while the workers themselves write blocks as they arrive
         try:
             while not self.part_file.complete:
-                # A local failure such as a full disk would hit every peer the same way, so it ends the download
+                # A link no source can satisfy, or a local failure such as a full disk, hits every peer the same
+                # way, so it ends the download
+                if isinstance(self._failure, LinkMismatchError):
+                    raise self._failure
                 if self._failure is not None:
                     err_msg = f'{self.part_file.name}: {self._failure}'
                     raise DownloadError(err_msg) from self._failure
 
                 now = loop.time()
                 if now >= deadline:
-                    err_msg = f'{self.part_file.name}: deadline passed with {self.part_file.verified_bytes} bytes'
-                    raise DownloadError(err_msg)
+                    raise DownloadError(self._deadline_message())
 
                 if now >= next_refresh:
                     logger.info('%d new sources', self.add_sources(await feed()))
@@ -243,6 +267,18 @@ class Downloader:
             await asyncio.gather(*self._workers.values(), return_exceptions=True)
 
         return self._release(download_dir)
+
+    def _deadline_message(self) -> str:
+        """Describe a download that ran out of time, naming the parts still waiting for AICH hashes.
+
+        :returns: the message.
+        :rtype: str
+        """
+        part_file = self.part_file
+        message = f'{part_file.name}: deadline passed with {part_file.verified_bytes} bytes'
+        if waiting := self._waiting_for_aich(set(range(part_file.part_count)) - part_file.verified_parts):
+            message += f', and parts {sorted(waiting)} still wait for AICH hashes that only a complete source serves'
+        return message
 
     def _start_workers(self, now: float) -> None:
         """Start workers for sources that are due, up to the peer limit.
@@ -305,6 +341,8 @@ class Downloader:
         except (HashMismatchError, ProtocolError) as error:
             logger.warning('Banning %s:%d for this file: %s', source.host, source.port, error)
             state.banned = True
+        except LinkMismatchError as error:
+            self._failure = error
         except ConnectionFailedError as error:
             state.failures += 1
             state.banned = state.failures >= self.settings.max_connect_failures
@@ -327,20 +365,22 @@ class Downloader:
         :type key: SourceKey
         """
         part_file = self.part_file
-        await connection.hello()
+        remote = await connection.hello()
         status = await connection.request_file(file_hash=part_file.file_hash, size=part_file.size)
 
         # A file of one part has no hashset, because its file hash is the part hash
         if part_file.needs_hashset:
             part_file.set_hashset(await connection.request_hashset(part_file.file_hash))
+        await self._fetch_aich(connection, remote=remote, status=status)
 
         # A peer with nothing new is not asked for a slot, so it does not count the request against this client
-        if not any(True for _ in part_file.missing_blocks(parts=set(status.parts))):
+        parts = set(status.parts)
+        if not any(True for _ in part_file.missing_blocks(parts=parts - self._waiting_for_aich(parts))):
             return
 
         await connection.request_upload(part_file.file_hash, queue_wait=self.settings.queue_wait)
         large = part_file.size > LARGE_FILE_THRESHOLD
-        while blocks := self._claim(set(status.parts), key=key):
+        while blocks := self._claim(parts, key=key):
             try:
                 async for block, offset, data in connection.download_blocks(
                     file_hash=part_file.file_hash, blocks=blocks, large=large
@@ -349,12 +389,52 @@ class Downloader:
             finally:
                 self._in_flight.difference_update(blocks)
 
-    def _store(self, *, block: Block, offset: int, data: bytes, key: SourceKey) -> None:
-        """Write data and decide who is to blame when its part fails the hash check.
+    async def _fetch_aich(self, connection: PeerConnection, *, remote: HelloInfo, status: FileStatus) -> None:
+        """Ask a complete source for the AICH hashes of every unverified part that still lacks them.
 
-        Without AICH the client cannot tell which block of a failed part was bad. A part that came from one peer
-        convicts that peer. A part with several contributors convicts nobody: it is wiped and handed to a single
-        peer, so that a second failure has exactly one suspect.
+        Only a source with the whole file can answer. A source that does not announce AICH is not asked, because an
+        older client leaves the request unanswered until the connection times out.
+
+        :param connection: the open connection.
+        :type connection: PeerConnection
+        :param remote: what the peer said in its hello.
+        :type remote: HelloInfo
+        :param status: the parts the peer has.
+        :type status: FileStatus
+        :raises ProtocolError: when an answer does not prove itself against the root, which bans the peer.
+        """
+        part_file = self.part_file
+        aich = part_file.aich
+        if aich is None or not remote.aich or len(status.parts) < part_file.part_count:
+            return
+
+        for part in range(part_file.part_count):
+            if part in part_file.verified_parts or aich.ready(part):
+                continue
+            asked = aich.source_part(part)
+            hashes = await connection.request_aich(
+                file_hash=part_file.file_hash, part=asked, root=aich.root, count=aich.hash_count(asked)
+            )
+            if hashes is None:
+                logger.info('%s serves no AICH hashes for %s', connection.stream.peer, part_file.name)
+                return
+            aich.accept(part=asked, hashes=hashes)
+
+    def _waiting_for_aich(self, parts: set[int]) -> set[int]:
+        """Pick the parts that may not be fetched yet, because their AICH hashes are required and still missing.
+
+        :param parts: the parts to look at.
+        :type parts: set[int]
+        :returns: the parts that wait.
+        :rtype: set[int]
+        """
+        aich = self.part_file.aich
+        if aich is None or self.settings.aich != AichPolicy.REQUIRE:
+            return set()
+        return {part for part in parts if not aich.ready(part)}
+
+    def _store(self, *, block: Block, offset: int, data: bytes, key: SourceKey) -> None:
+        """Write data, remembering which peer wrote into which block in case its part fails.
 
         :param block: the block the data belongs to.
         :type block: Block
@@ -364,25 +444,53 @@ class Downloader:
         :type data: bytes
         :param key: the peer that sent them.
         :type key: SourceKey
-        :raises HashMismatchError: when this peer alone delivered a corrupt part.
+        :raises HashMismatchError: when the failed part convicts this peer.
         """
-        self._contributors.setdefault(block.part, set()).add(key)
+        self._senders.setdefault(block.part, {}).setdefault(block.start, set()).add(key)
         try:
             verified = self.part_file.write(block=block, start=offset, data=data)
         except HashMismatchError as error:
-            # The writer is always among the suspects, because it was added above. Alone it is banned by raising,
-            # which ends its worker, and among others the part is handed to the next single peer instead
-            suspects = self._contributors.pop(error.part, set())
-            if suspects == {key}:
-                raise
-            self._exclusive[error.part] = None
-            logger.warning('Part %d failed its hash with %d contributors', error.part, len(suspects))
+            self._blame(error, key=key)
             return
 
         if verified is not None:
-            self._contributors.pop(verified, None)
+            self._senders.pop(verified, None)
             self._exclusive.pop(verified, None)
             self._report()
+
+    def _blame(self, error: HashMismatchError, *, key: SourceKey) -> None:
+        """Ban the peers a failed part convicts and free the part for the next attempt.
+
+        With AICH the failed blocks are known, so the only peer that wrote into a failed block is banned and the good
+        blocks stay. A failed block that several peers wrote into convicts nobody and is fetched again. Without AICH a
+        part that came from one peer convicts that peer, and a part with several contributors convicts nobody: it is
+        handed to a single peer, so that a second failure has exactly one suspect.
+
+        :param error: the failure.
+        :type error: HashMismatchError
+        :param key: the peer whose data completed the part.
+        :type key: SourceKey
+        :raises HashMismatchError: when this peer is convicted, which ends its worker.
+        """
+        if error.bad_blocks:
+            senders = self._senders.get(error.part, {})
+            writers = [senders.pop(start, set()) for start in error.bad_blocks]
+            guilty = {peer for peers in writers if len(peers) == 1 for peer in peers}
+        else:
+            suspects = set().union(*self._senders.pop(error.part, {}).values())
+            guilty = suspects if len(suspects) == 1 else set()
+            if not guilty:
+                self._exclusive[error.part] = None
+
+        # Another convicted peer stops at its next claim, which hands out nothing to a banned source
+        for peer in guilty - {key}:
+            source = self._sources[peer].source
+            logger.warning('Banning %s:%d for this file: %s', source.host, source.port, error)
+            self._sources[peer].banned = True
+        if key in guilty:
+            raise error
+        if not guilty:
+            logger.warning('%s, and no single peer is to blame', error)
 
     def _claim(self, parts: set[int], *, key: SourceKey) -> list[Block]:
         """Reserve up to three missing blocks this peer has and nobody else is fetching.
@@ -398,7 +506,7 @@ class Downloader:
             return []
 
         claimed = []
-        for block in self.part_file.missing_blocks(parts=parts):
+        for block in self.part_file.missing_blocks(parts=parts - self._waiting_for_aich(parts)):
             # A part in _exclusive is free while its owner is None and pinned to one peer otherwise
             if block in self._in_flight or self._exclusive.get(block.part, key) not in {key, None}:
                 continue
