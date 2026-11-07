@@ -22,7 +22,13 @@ from typing import TYPE_CHECKING, Self
 
 from ed2k_client.constants import DEFAULT_TCP_PORT, DEFAULT_UDP_PORT, Protocol
 from ed2k_client.download import Downloader, DownloadSettings
-from ed2k_client.errors import ConnectionFailedError, NotConnectedError, SecurityError, StateInUseError
+from ed2k_client.errors import (
+    ConnectionFailedError,
+    NotConnectedError,
+    ProtocolError,
+    SecurityError,
+    StateInUseError,
+)
 from ed2k_client.identity import Identity
 from ed2k_client.kad.contacts import NODES_DAT_URL, download_nodes_dat, parse_nodes_dat
 from ed2k_client.kad.node import KadNode
@@ -542,7 +548,8 @@ class Client:
                 stream = await PacketStream.accept(
                     reader=reader, writer=writer, own_hash=self.identity.user_hash, options=self._peer_stream
                 )
-            except (TimeoutError, OSError, asyncio.IncompleteReadError, SecurityError) as error:
+            # A first byte that is no protocol byte starts a handshake, which a peer sending anything else fails
+            except (TimeoutError, OSError, asyncio.IncompleteReadError, ProtocolError, SecurityError) as error:
                 logger.info('Incoming %s:%d dropped: %r', host, port, error)
                 writer.close()
                 return
@@ -569,7 +576,7 @@ class Client:
                 connection = PeerConnection(stream=stream, local=self._local, settings=self.config.peer)
                 await connection.hello()
                 await connection.serve(library=self.library, slots=self._slots)
-        except ConnectionFailedError as error:
+        except (ConnectionFailedError, ProtocolError) as error:
             logger.info('Callback to %s:%d failed: %s', host, port, error)
 
 
