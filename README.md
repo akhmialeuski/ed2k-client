@@ -103,7 +103,8 @@ uv run ed2k-client servers
 TOML file shaped like [config.example.toml](config.example.toml), and a flag wins over the file. `--server
 ed2k://|server|ip|port|/` picks a server, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use
 any free port, and `--connect-timeout` and `--read-timeout` set the connection timeouts. `download` accepts several
-links and fetches them concurrently with one identity, `--deadline-hours` and `--max-peers` bound each download, and
+links and fetches them concurrently with one identity, `--safe-content` and `--any-content` widen what leaves
+quarantine, `--deadline-hours` and `--max-peers` bound each download, and
 `share` takes `--upload-slots`.
 
 ## Design
@@ -138,9 +139,15 @@ Everything that arrives from the network is untrusted, and these are the defence
 - File names from the network are sanitised to one path component and every write is proved to stay inside its
   directory, which defeats `../` and absolute-path tricks.
 - Downloaded data stays in quarantine until its eD2k hash and every part hash match. The content is then classified
-  by its magic bytes: executables, scripts and archives are refused, a PDF is refused when its dictionaries carry
-  `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm` (hex-escaped names
-  included), and only PDF and DjVu are released by default. Released files are mode 0600, never executable.
+  by its magic bytes, and `download.content_policy` decides what leaves quarantine. `documents`, the default,
+  releases only PDF and DjVu. `safe` (`--safe-content`) releases files of any kind except programs, scripts and
+  Office documents that may carry macros. `any` (`--any-content`) releases everything and only records the verdict.
+  Under the first two, a PDF is refused when its dictionaries carry `/JavaScript`, `/JS`, `/Launch`,
+  `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm` (hex-escaped names included), outside its strings,
+  comments and stream bodies. Under the first two, a file is also refused when the name it is released under has an
+  extension that runs when opened, such as `.bat`, `.js`, `.hta` or `.docm`, and a ZIP is refused when it holds an
+  Office macro project or a Java manifest. Other archives pass `safe` as notable, because their other members are
+  not inspected. Released files are mode 0600, never executable.
 - Sharing is off until `share()` is called. Peers name files only by hash, symbolic links are not shared, and a
   file changed on disk after hashing is withdrawn instead of served.
 - Kad answers are accepted only from a node the client is waiting on for that opcode, which drops forged answers.

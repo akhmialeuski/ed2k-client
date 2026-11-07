@@ -58,6 +58,7 @@ LEECHER = 'leecher'
 SEEDER = 'seeder'
 HOSTILE = 'hostile'
 SOURCE_DIR = 'src'
+BATCH_FILE = 'setup.bat'
 DOWNLOADS = 'downloads'
 BOOK = 'book.pdf'
 TRAP = 'trap.pdf'
@@ -161,6 +162,42 @@ async def test_djvu_and_non_document_content(tmp_path: Path) -> None:
 
     assert result.inspection.kind == DocumentKind.DJVU
     assert released.path.read_bytes() == binary.read_bytes()
+
+
+async def test_safe_policy_releases_data_and_keeps_a_script(tmp_path: Path) -> None:
+    """Under the SAFE policy a data file leaves quarantine and a script stays in it."""
+    binary = source_file(tmp_path, 'data.bin', incompressible(50_000, header=b'\x00\x01'))
+    script = source_file(tmp_path, 'install.sh', b'#!/bin/sh\necho hostile\n' * 200)
+    safe = replace(SHORT, content_policy=ContentPolicy.SAFE)
+    async with AsyncExitStack() as stack:
+        seeder = await stack.enter_async_context(Client(make_config(tmp_path, SEEDER)))
+        await seeder.share(tmp_path / SOURCE_DIR)
+        leecher = await leech(stack, tmp_path, download=safe)
+        released = await leecher.download(link_for(binary), extra_sources=[source_of(seeder)])
+        with pytest.raises(SecurityError, match='dangerous content'):
+            await leecher.download(link_for(script), extra_sources=[source_of(seeder)])
+
+    assert released.path.read_bytes() == binary.read_bytes()
+    assert not (tmp_path / LEECHER / 'downloads' / 'install.sh').exists()
+
+
+async def test_safe_policy_keeps_a_script_known_only_by_its_name(tmp_path: Path) -> None:
+    """Under the SAFE policy a Windows batch file stays in quarantine, judged by the name it would be released as.
+
+    The quarantined data is named by its hash, so only the final name tells the content check that it runs.
+
+    :param tmp_path: the directory of the clients' files.
+    :type tmp_path: Path
+    """
+    script = source_file(tmp_path, BATCH_FILE, b'@echo off\r\npowershell -enc AAAA\r\n' * 200)
+    safe = replace(SHORT, content_policy=ContentPolicy.SAFE)
+    async with AsyncExitStack() as stack:
+        seeder, _ = await seed(stack, tmp_path, SEEDER, script)
+        leecher = await leech(stack, tmp_path, download=safe)
+        with pytest.raises(SecurityError, match=r'\.bat'):
+            await leecher.download(link_for(script), extra_sources=[source_of(seeder)])
+
+    assert not (download_dir(tmp_path) / BATCH_FILE).exists()
 
 
 async def test_three_seeders_share_the_work(tmp_path: Path) -> None:

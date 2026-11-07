@@ -16,8 +16,10 @@ The client trusts no byte it receives, and four kinds of input reach the disk or
 import ipaddress
 import re
 import unicodedata
-from dataclasses import dataclass, field
+import zipfile
+from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum, auto
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Literal, Self
 
 from ed2k_client.errors import SecurityError
@@ -73,16 +75,70 @@ PDF_DANGEROUS_KEYS: frozenset[bytes] = frozenset(
     {b'JavaScript', b'JS', b'Launch', b'EmbeddedFile', b'EmbeddedFiles', b'RichMedia', b'XFA', b'SubmitForm'}
 )
 PDF_NOTABLE_KEYS: frozenset[bytes] = frozenset({b'OpenAction', b'AA', b'ObjStm', b'Encrypt', b'URI'})
-MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+# Content that runs when opened: programs, scripts and Office documents that may carry macros
+ACTIVE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b'MZ', 'Windows executable'),
     (b'\x7fELF', 'ELF executable'),
     (b'#!', 'script'),
     (b'\xca\xfe\xba\xbe', 'Mach-O or Java class'),
     (b'\xcf\xfa\xed\xfe', 'Mach-O executable'),
-    (b'PK\x03\x04', 'ZIP archive'),
+    (b'\xd0\xcf\x11\xe0', 'OLE document with possible macros'),
+)
+
+# Containers that run nothing themselves. Only the member names of a ZIP are read, because Office files of today
+# and Java archives are ZIP files that run when opened
+ZIP_SIGNATURE: bytes = b'PK\x03\x04'
+ARCHIVE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (ZIP_SIGNATURE, 'ZIP archive'),
     (b'Rar!', 'RAR archive'),
     (b"7z\xbc\xaf'\x1c", '7-Zip archive'),
-    (b'\xd0\xcf\x11\xe0', 'OLE document with possible macros'),
+)
+
+# A macro-enabled Office file keeps its macros in a vbaProject.bin part, and a Java archive names its entry point in
+# META-INF/MANIFEST.MF
+MACRO_PROJECT_MEMBER: str = 'vbaproject.bin'
+JAVA_MANIFEST_MEMBER: str = 'meta-inf/manifest.mf'
+MACRO_DOCUMENT_LABEL: str = 'Office document with macros'
+JAVA_ARCHIVE_LABEL: str = 'Java archive'
+
+# Windows opens a file with the program its extension names, whatever the content says, so these names run code
+# when the file is opened: programs, scripts, shortcuts and macro-enabled Office formats
+ACTIVE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        'bat',
+        'cmd',
+        'com',
+        'cpl',
+        'exe',
+        'hta',
+        'jar',
+        'js',
+        'jse',
+        'lnk',
+        'msi',
+        'msp',
+        'pif',
+        'ps1',
+        'psm1',
+        'reg',
+        'scr',
+        'sh',
+        'vb',
+        'vbe',
+        'vbs',
+        'wsf',
+        'wsh',
+        'docm',
+        'dotm',
+        'xlsm',
+        'xltm',
+        'xlam',
+        'pptm',
+        'potm',
+        'ppam',
+        'ppsm',
+        'sldm',
+    }
 )
 
 
@@ -438,26 +494,75 @@ def _pdf_keys(path: Path, *, chunk_size: int) -> set[bytes]:
             pending = window[position:]
 
 
-def inspect_document(path: Path, *, io: IoSettings = DEFAULT_IO) -> Inspection:
-    """Classify a downloaded file by its content and look for dangerous parts.
+def inspect_document(path: Path, *, name: str | None = None, io: IoSettings = DEFAULT_IO) -> Inspection:
+    """Classify a downloaded file by its content and look for dangerous parts, in the content and in its name.
 
     Names written with ``#xx`` escapes, a known trick to hide ``/JavaScript`` from naive scanners, are decoded
     before matching. Keys inside compressed object streams stay invisible, so ``ObjStm`` is reported as notable.
 
     :param path: the file.
     :type path: Path
+    :param name: the name the file will carry, the name of ``path`` when ``None``.
+    :type name: str | None
     :param io: how much of the file is read at a time.
     :type io: IoSettings
     :returns: the verdict.
+    :rtype: Inspection
+    """
+    verdict = _inspect_content(path, io=io)
+
+    # The kind comes from the content, while whether opening the file runs it also depends on the name it keeps
+    extension = PurePath(name if name is not None else path.name).suffix.lower().removeprefix('.')
+    if extension not in ACTIVE_EXTENSIONS:
+        return verdict
+    return replace(verdict, dangerous=(*verdict.dangerous, f'.{extension} file, which runs when opened'))
+
+
+def _zip_dangers(path: Path) -> tuple[str, ...]:
+    """Name the members that make a ZIP archive run when it is opened.
+
+    :param path: the archive.
+    :type path: Path
+    :returns: the dangers found, empty for an archive of data or one whose directory cannot be read.
+    :rtype: tuple[str, ...]
+    """
+    # An archive whose central directory is unreadable is opened neither by Office nor by Java, so it stays a plain
+    # archive, whose members are not inspected
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = [member.lower() for member in archive.namelist()]
+    except zipfile.BadZipFile:
+        return ()
+
+    dangers: list[str] = []
+    if any(member.rpartition('/')[2] == MACRO_PROJECT_MEMBER for member in members):
+        dangers.append(MACRO_DOCUMENT_LABEL)
+    if JAVA_MANIFEST_MEMBER in members:
+        dangers.append(JAVA_ARCHIVE_LABEL)
+    return tuple(dangers)
+
+
+def _inspect_content(path: Path, *, io: IoSettings) -> Inspection:
+    """Classify a file by its content alone.
+
+    :param path: the file.
+    :type path: Path
+    :param io: how much of the file is read at a time.
+    :type io: IoSettings
+    :returns: the verdict on the content.
     :rtype: Inspection
     """
     with path.open(READ_BINARY) as stream:
         head = stream.read(io.head_window)
 
     # The file type comes from the content, never from the name a peer chose
-    for signature, label in MAGIC_SIGNATURES:
+    for signature, label in ACTIVE_SIGNATURES:
         if head.startswith(signature):
             return Inspection(kind=DocumentKind.OTHER, dangerous=(label,))
+    for signature, label in ARCHIVE_SIGNATURES:
+        if head.startswith(signature):
+            dangers = _zip_dangers(path) if signature == ZIP_SIGNATURE else ()
+            return Inspection(kind=DocumentKind.OTHER, dangerous=dangers, notable=(label,))
     if head.startswith(DJVU_MARKER):
         return Inspection(kind=DocumentKind.DJVU)
 
@@ -473,25 +578,30 @@ def inspect_document(path: Path, *, io: IoSettings = DEFAULT_IO) -> Inspection:
     )
 
 
-def check_document(path: Path, *, expected: Sequence[DocumentKind], io: IoSettings = DEFAULT_IO) -> Inspection:
-    """Inspect a file and refuse it unless it is a safe document of an expected kind.
+def check_document(
+    path: Path, *, expected: Sequence[DocumentKind] | None, name: str | None = None, io: IoSettings = DEFAULT_IO
+) -> Inspection:
+    """Inspect a file and refuse it unless it is safe and, when kinds are given, of an expected kind.
 
     :param path: the file.
     :type path: Path
-    :param expected: the acceptable kinds.
-    :type expected: Sequence[DocumentKind]
+    :param expected: the acceptable kinds, or ``None`` to accept a file of any kind that carries nothing active.
+    :type expected: Sequence[DocumentKind] | None
+    :param name: the name the file will carry, the name of ``path`` when ``None``.
+    :type name: str | None
     :param io: how much of the file is read at a time.
     :type io: IoSettings
     :returns: the verdict of a file that passed.
     :rtype: Inspection
-    :raises SecurityError: when the content is of another kind or carries dangerous parts.
+    :raises SecurityError: when the content is of another kind or the file carries dangerous parts.
     """
-    verdict = inspect_document(path, io=io)
-    if verdict.kind not in expected:
-        err_msg = f'{path.name}: content is {verdict.kind} {list(verdict.dangerous)}, expected {list(expected)}'
+    shown = name if name is not None else path.name
+    verdict = inspect_document(path, name=name, io=io)
+    if expected is not None and verdict.kind not in expected:
+        err_msg = f'{shown}: content is {verdict.kind} {list(verdict.dangerous)}, expected {list(expected)}'
         raise SecurityError(err_msg)
 
     if not verdict.is_safe:
-        err_msg = f'{path.name}: dangerous content {list(verdict.dangerous)}'
+        err_msg = f'{shown}: dangerous content {list(verdict.dangerous)}'
         raise SecurityError(err_msg)
     return verdict

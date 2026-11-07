@@ -173,6 +173,8 @@ async def _download(arguments: argparse.Namespace) -> None:
     download = config.download
     if arguments.any_content:
         download = replace(download, content_policy=ContentPolicy.ANY)
+    if arguments.safe_content:
+        download = replace(download, content_policy=ContentPolicy.SAFE)
     if arguments.deadline_hours is not None:
         download = replace(download, deadline=arguments.deadline_hours * SECONDS_PER_HOUR)
     if arguments.max_peers is not None:
@@ -271,7 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     download = commands.add_parser('download', parents=[network], help='download ed2k:// file links concurrently')
     download.add_argument('links', nargs='+', metavar='link')
-    download.add_argument('--any-content', action=FLAG, help='release files that are not PDF or DjVu')
+    content = download.add_mutually_exclusive_group()
+    content.add_argument('--safe-content', action=FLAG, help='release any file except programs, scripts and macros')
+    content.add_argument('--any-content', action=FLAG, help='release every file, programs included')
     download.add_argument('--deadline-hours', type=float, help='give up after this many hours')
     download.add_argument('--max-peers', type=int, help='sources downloaded from at the same time')
     download.set_defaults(handler=_download)

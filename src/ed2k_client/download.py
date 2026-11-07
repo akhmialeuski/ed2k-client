@@ -53,9 +53,15 @@ FINAL_FILE_MODE: int = 0o600
 
 
 class ContentPolicy(StrEnum):
-    """Which finished files may leave quarantine."""
+    """Which finished files may leave quarantine.
+
+    ``DOCUMENTS`` releases PDF and DjVu files without active content. ``SAFE`` releases files of any kind except
+    programs, scripts, documents that may carry macros and PDF files with active content. ``ANY`` releases every
+    file and only records what the inspection found.
+    """
 
     DOCUMENTS = 'documents'
+    SAFE = 'safe'
     ANY = 'any'
 
 
@@ -407,13 +413,17 @@ class Downloader:
         part_file = self.part_file
 
         # check_document raises SecurityError on a refused file, which leaves it in quarantine, while the ANY policy
-        # only records what the inspection found
-        if self.settings.content_policy == ContentPolicy.DOCUMENTS:
-            inspection = check_document(
-                part_file.data_path, expected=(DocumentKind.PDF, DocumentKind.DJVU), io=self.io_settings
-            )
-        else:
-            inspection = inspect_document(part_file.data_path, io=self.io_settings)
+        # only records what the inspection found. The quarantined data is named by its hash, so the checks get the
+        # name the file is released under, which decides what opening it runs
+        data, name, io = part_file.data_path, part_file.name, self.io_settings
+        match self.settings.content_policy:
+            case ContentPolicy.DOCUMENTS:
+                expected = (DocumentKind.PDF, DocumentKind.DJVU)
+                inspection = check_document(data, expected=expected, name=name, io=io)
+            case ContentPolicy.SAFE:
+                inspection = check_document(data, expected=None, name=name, io=io)
+            case ContentPolicy.ANY:
+                inspection = inspect_document(data, name=name, io=io)
 
         target = unique_path(resolve_inside(download_dir, part_file.name))
         part_file.data_path.replace(target)

