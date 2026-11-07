@@ -1,5 +1,6 @@
 """Unit tests of the defences: file names, paths, addresses, content inspection and the part file."""
 
+import contextlib
 import io
 import re
 import struct
@@ -10,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 from Crypto.Hash import MD4
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
 from ed2k_client.errors import HashMismatchError, ProtocolError, SecurityError
@@ -19,6 +22,7 @@ from ed2k_client.security import (
     AddressPolicy,
     DocumentKind,
     IpFilter,
+    PdfKeyScan,
     check_document,
     inspect_document,
     resolve_inside,
@@ -42,6 +46,9 @@ FILTER_TEXT = (
 )
 TIMEOUT = 1.0
 
+# Hostile input, with no example kept on disk, as a unit test writes no file
+FUZZ = settings(database=None)
+ANY_BYTES = st.binary(max_size=4096)
 ZIP_START = b'PK\x03\x04'
 
 # A member header the reader cannot follow: where the flags field, followed by the method field, sits after the
@@ -231,6 +238,27 @@ class TestIpFilter:
         with pytest.raises(ProtocolError, match='broken IP filter archive member'):
             IpFilter.download(FILTER_URL, limits=DEFAULT_LIMITS, timeout=TIMEOUT)
 
+    @FUZZ
+    @given(text=st.text(max_size=2000))
+    def test_any_text_parses_without_error(self, text: str) -> None:
+        """Any text parses into a filter, skipping the lines that are not ranges, as aMule skips them.
+
+        :param text: the text a hostile filter host chose.
+        :type text: str
+        """
+        IpFilter.parse(text.splitlines()).blocks(PUBLIC_IP)
+
+    @FUZZ
+    @given(data=ANY_BYTES)
+    def test_any_archive_unpacks_or_fails(self, data: bytes) -> None:
+        """Any download that starts like a ZIP unpacks or fails as a protocol error.
+
+        :param data: the bytes after the ZIP signature that a hostile filter host chose.
+        :type data: bytes
+        """
+        with patch(FETCH, return_value=ZIP_START + data), contextlib.suppress(ProtocolError):
+            IpFilter.download(FILTER_URL, limits=DEFAULT_LIMITS, timeout=TIMEOUT)
+
 
 class TestInspectDocument:
     """Tests of :func:`inspect_document`."""
@@ -307,6 +335,16 @@ class TestInspectDocument:
         fs.create_file(path, contents=head + filler + b'>> stream\n) /JS 1 0 R >>\n<< >> stream\nabc\nendstream')
 
         assert inspect_document(path).dangerous == (JS,)
+
+    @FUZZ
+    @given(data=ANY_BYTES)
+    def test_any_bytes_scan_without_error(self, data: bytes) -> None:
+        """The PDF key scan reads any bytes to their end without an error.
+
+        :param data: the bytes a hostile file holds.
+        :type data: bytes
+        """
+        assert PdfKeyScan().scan(data, safe=len(data)) >= len(data)
 
 
 class TestCheckDocument:

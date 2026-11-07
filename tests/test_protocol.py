@@ -1,11 +1,14 @@
 """Unit tests of the wire format: framing, tags, search trees, links, server lists, Kad IDs and obfuscation keys."""
 
+import contextlib
 import struct
 import zlib
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from ed2k_client.constants import Protocol
 from ed2k_client.errors import ProtocolError
@@ -16,7 +19,7 @@ from ed2k_client.obfuscation import PROTOCOL_BYTES, derive_ciphers, semi_random_
 from ed2k_client.search import SearchQuery, SearchResult, SearchResults, encode_query, parse_server_results
 from ed2k_client.servermet import ServerList
 from ed2k_client.tags import Tag, read_tags, write_tags
-from ed2k_client.wire import U32, Reader, Writer, inflate, unpack_payload
+from ed2k_client.wire import U32, Reader, Writer, decode_udp, inflate, unpack_payload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,6 +32,20 @@ FIRST_SERVER = '203.0.113.10:4661'
 SECOND_SERVER = '203.0.113.20:4242'
 THIRD_SERVER = '198.51.100.66:4661'
 KAD = 'kad'
+
+# Hostile input for the parsers: anything a sender may put on the wire, and text shaped like an ed2k link so that the
+# parse gets past the scheme. Examples are not kept on disk, as a unit test writes no file
+FUZZ = settings(database=None)
+ANY_BYTES = st.binary(max_size=4096)
+FUZZ_INFLATE_LIMIT = 1024
+# A small count in front of random bytes gets past the count check, so the parse reaches the records behind it
+SMALL_COUNT = st.integers(min_value=0, max_value=8)
+COUNTED_BYTES = st.tuples(SMALL_COUNT, ANY_BYTES).map(lambda item: U32.pack(item[0]) + item[1])
+SERVER_MET_BYTES = st.tuples(SMALL_COUNT, ANY_BYTES).map(lambda item: bytes([0xE0]) + U32.pack(item[0]) + item[1])
+NODES_DAT_BYTES = st.tuples(st.integers(min_value=1, max_value=3), SMALL_COUNT, ANY_BYTES).map(
+    lambda item: U32.pack(0) + U32.pack(item[0]) + U32.pack(item[1]) + item[2]
+)
+LINK_LIKE_TEXT = st.lists(st.text(max_size=24), max_size=6).map(lambda fields: 'ed2k://|' + '|'.join(fields) + '|/')
 SERVER_LINK = 'ed2k://|server|45.82.80.155|5687|/'
 
 
@@ -58,6 +75,17 @@ class TestInflate:
         with pytest.raises(ProtocolError, match='beyond'):
             inflate(bomb, limit=1_000_000)
 
+    @FUZZ
+    @given(data=ANY_BYTES)
+    def test_any_bytes_inflate_within_the_limit_or_fail(self, data: bytes) -> None:
+        """Any payload inflates to at most the limit or fails as a protocol error.
+
+        :param data: the bytes a hostile sender chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            assert len(inflate(data, limit=FUZZ_INFLATE_LIMIT)) <= FUZZ_INFLATE_LIMIT
+
 
 class TestUnpackPayload:
     """Tests of :func:`unpack_payload`."""
@@ -70,6 +98,17 @@ class TestUnpackPayload:
         server = unpack_payload(protocol=Protocol.PACKED, opcode=0x33, payload=body, packed_as=Protocol.EDONKEY)
         assert server.protocol == Protocol.EDONKEY
         assert server.payload == b'payload'
+
+    @FUZZ
+    @given(data=ANY_BYTES)
+    def test_any_datagram_decodes_or_fails(self, data: bytes) -> None:
+        """Any UDP datagram decodes to a packet or fails as a protocol error.
+
+        :param data: the datagram a hostile sender chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            decode_udp(data)
 
 
 class TestReadTags:
@@ -94,6 +133,17 @@ class TestReadTags:
         """A tag type whose length cannot be known stops the parse."""
         with pytest.raises(ProtocolError, match='unknown tag type'):
             read_tags(Reader(U32.pack(1) + bytes([0xBF, 0x01, 0x00])))
+
+    @FUZZ
+    @given(data=COUNTED_BYTES)
+    def test_any_bytes_give_tags_or_fail(self, data: bytes) -> None:
+        """Any tag list reads or fails as a protocol error, whatever its counts and lengths claim.
+
+        :param data: the bytes a hostile sender chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            read_tags(Reader(data))
 
 
 class TestEncodeQuery:
@@ -189,6 +239,17 @@ class TestParseServerResults:
         assert parsed.more_available
         assert (parsed.results[0].name, parsed.results[0].size, parsed.results[0].sources) == (BOOK, 5_648_714, 3)
 
+    @FUZZ
+    @given(data=COUNTED_BYTES)
+    def test_any_bytes_give_a_page_or_fail(self, data: bytes) -> None:
+        """Any search result page parses or fails as a protocol error.
+
+        :param data: the bytes a hostile server chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            parse_server_results(Reader(data))
+
 
 class TestLinkParse:
     """Tests of :meth:`FileLink.parse` and :meth:`ServerLink.parse`."""
@@ -228,6 +289,18 @@ class TestLinkParse:
         with pytest.raises(ProtocolError):
             parse_link()
 
+    @FUZZ
+    @given(text=LINK_LIKE_TEXT)
+    def test_any_link_text_parses_or_fails(self, text: str) -> None:
+        """Any text shaped like a link parses as a file or server link or fails as a protocol error.
+
+        :param text: the text a search result or a user supplied.
+        :type text: str
+        """
+        for parse in (FileLink.parse, ServerLink.parse):
+            with contextlib.suppress(ProtocolError):
+                parse(text)
+
 
 class TestServerList:
     """Tests of :meth:`ServerList.parse`."""
@@ -241,6 +314,17 @@ class TestServerList:
         server = ServerList.parse(data).servers[0]
 
         assert (server.host, server.port, server.name, server.users) == ('176.123.5.89', 4725, 'eMule Sunrise', 53_847)
+
+    @FUZZ
+    @given(data=SERVER_MET_BYTES)
+    def test_any_bytes_give_a_list_or_fail(self, data: bytes) -> None:
+        """Any server.met parses or fails as a protocol error.
+
+        :param data: the bytes a hostile list host chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            ServerList.parse(data)
 
 
 class TestKadId:
@@ -268,6 +352,17 @@ class TestParseNodesDat:
         contacts = parse_nodes_dat(data)
 
         assert [(c.host, c.udp_port, c.version) for c in contacts] == [('90.94.50.178', 4672, 10)]
+
+    @FUZZ
+    @given(data=NODES_DAT_BYTES)
+    def test_any_bytes_give_contacts_or_fail(self, data: bytes) -> None:
+        """Any nodes.dat parses or fails as a protocol error.
+
+        :param data: the bytes a hostile list host chose.
+        :type data: bytes
+        """
+        with contextlib.suppress(ProtocolError):
+            parse_nodes_dat(data)
 
 
 class TestDeriveCiphers:
