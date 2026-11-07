@@ -183,12 +183,17 @@ class PartFile:
 
         # Only verified parts survive a restart. Blocks of an unfinished part are fetched again, because nothing
         # proves that bytes written before a crash are the bytes a peer sent
+        resumed = False
         if part_file.metadata_path.exists() and part_file.data_path.exists():
             state = PartState(**json.loads(part_file.metadata_path.read_text(encoding=ENCODING)))
-            if state.size == size:
+            resumed = state.size == size
+            if resumed:
                 part_file.part_hashes = tuple(bytes.fromhex(item) for item in state.part_hashes)
                 part_file.verified_parts = set(state.verified_parts)
-        else:
+
+        # Progress under another size cannot be resumed, and its data file may be longer than this size, so it starts
+        # over too: a stale tail would otherwise leave quarantine with the verified parts
+        if not resumed:
             # os.open sets mode 0600 at creation, and ftruncate makes a sparse file that takes no space yet
             descriptor = os.open(part_file.data_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, FILE_MODE)
             os.ftruncate(descriptor, size)
@@ -258,12 +263,18 @@ class PartFile:
         :type data: bytes
         :returns: the index of a part that just verified, or ``None``.
         :rtype: int | None
-        :raises ProtocolError: when the data falls outside the block.
+        :raises ProtocolError: when the data falls outside the block or into a part that is already verified.
         :raises HashMismatchError: when a completed part fails its hash; the part is then wiped.
         """
         end = start + len(data)
         if not data or start < block.start or end > block.end:
             err_msg = f'data from {start} to {end} lies outside block {block}'
+            raise ProtocolError(err_msg)
+
+        # A verified part is never hashed again before the file leaves quarantine, so a write into it would replace
+        # checked bytes for good. Each block goes to one peer only, so only a peer repeating data sends such a write
+        if block.part in self.verified_parts:
+            err_msg = f'{len(data)} bytes at {start} land in part number {block.part}, which is already verified'
             raise ProtocolError(err_msg)
 
         with self.data_path.open(UPDATE_BINARY) as stream:

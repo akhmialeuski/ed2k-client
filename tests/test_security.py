@@ -35,6 +35,7 @@ PUBLIC_IP = '8.8.8.8'
 LOOPBACK = '127.0.0.1'
 PORT = 4662
 JS = 'JS'
+SOURCE_DIR = Path('/src')
 ZIP_ARCHIVE = 'ZIP archive'
 MACRO_DANGER = 'Office document with macros'
 MAPS_ZIP = 'maps.zip'
@@ -292,7 +293,7 @@ def make_part_file(fs: FakeFilesystem, data: bytes) -> PartFile:
     :returns: the part file.
     :rtype: PartFile
     """
-    source = Path('/src') / BOOK
+    source = SOURCE_DIR / BOOK
     fs.create_file(source, contents=data)
     hashes = hash_file(source)
     part_file = PartFile.open(directory=QUARANTINE, name=BOOK, size=len(data), file_hash=hashes.file_hash)
@@ -361,6 +362,45 @@ class TestPartFile:
 
         with pytest.raises(ProtocolError, match='outside block'):
             part_file.write(block=Block(0, 100), start=50, data=bytes(100))
+
+    def test_data_for_a_verified_part_is_refused(self, fs: FakeFilesystem) -> None:
+        """A write into a part that already matched its hash is refused and leaves the verified bytes as they are.
+
+        One request can hold the last block of one part and the first block of the next, so a peer can send the first
+        block again after its part verified, and nothing checks that part again before the file leaves quarantine.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        data = bytes(range(256)) * ((PART_SIZE + BLOCK_SIZE) // 256)
+        part_file = make_part_file(fs, data)
+        first_part = blocks_of_part(size=len(data), part=0)
+        for block in first_part:
+            part_file.write(block=block, start=block.start, data=data[block.start : block.end])
+        last = first_part[-1]
+
+        with pytest.raises(ProtocolError, match='already verified'):
+            part_file.write(block=last, start=last.start, data=bytes(last.end - last.start))
+        assert part_file.read(start=last.start, length=last.end - last.start) == data[last.start : last.end]
+
+    def test_reopening_under_another_size_resizes_the_data(self, fs: FakeFilesystem) -> None:
+        """A hash opened again under a size other than the stored one gets a data file of the new size.
+
+        A search result's size comes from an untrusted server, so a forged larger size must not leave a longer data
+        file whose stale tail the correct download would later release with the verified parts.
+
+        :param fs: the in-memory file system.
+        :type fs: FakeFilesystem
+        """
+        data = bytes(500)
+        source = SOURCE_DIR / BOOK
+        fs.create_file(source, contents=data)
+        file_hash = hash_file(source).file_hash
+        PartFile.open(directory=QUARANTINE, name=BOOK, size=2 * len(data), file_hash=file_hash)
+
+        part_file = PartFile.open(directory=QUARANTINE, name=BOOK, size=len(data), file_hash=file_hash)
+
+        assert part_file.data_path.stat().st_size == len(data)
 
     def test_forged_hashset_is_refused(self, fs: FakeFilesystem) -> None:
         """A hashset that does not combine into the file hash is rejected.
