@@ -52,17 +52,17 @@ repos:
     hooks:
       - id: ruff-imports
         name: ruff check imports
-        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --select=I --fix src tests'
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --select=I --fix .'
         language: system
         pass_filenames: false
       - id: ruff-format
         name: ruff format
-        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff format --force-exclude src tests'
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff format --force-exclude .'
         language: system
         pass_filenames: false
       - id: ruff-check
         name: ruff check
-        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --fix src tests'
+        entry: bash -c 'cd PoCs/ed2k-client && uv run ruff check --force-exclude --fix .'
         language: system
         pass_filenames: false
       - id: ty
