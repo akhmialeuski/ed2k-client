@@ -36,6 +36,8 @@ MEBIBYTE: int = 1024 * 1024
 LOG_FORMAT: str = '%(asctime)s %(levelname)s %(name)s %(message)s'
 FLAG: str = 'store_true'
 USAGE_ERROR: int = 2
+ERROR_PREFIX: str = 'error: '
+LINKS_ARGUMENT: str = 'links'
 
 # Network flags and the settings they override, at the top level of ClientConfig and inside its timeouts
 CONFIG_FLAGS: tuple[tuple[str, str], ...] = (
@@ -166,7 +168,7 @@ class ProgressPrinter:
 async def _download(arguments: argparse.Namespace) -> None:
     """Download every link given, concurrently, with one client and therefore one identity.
 
-    :param arguments: the parsed command line.
+    :param arguments: the parsed command line, whose links :func:`main` has already parsed.
     :type arguments: argparse.Namespace
     """
     config = build_config(arguments)
@@ -187,13 +189,13 @@ async def _download(arguments: argparse.Namespace) -> None:
 
         # return_exceptions keeps one failed link from cancelling the downloads of the others
         outcomes = await asyncio.gather(
-            *(client.download(FileLink.parse(link), progress=printer) for link in arguments.links),
+            *(client.download(link, progress=printer) for link in arguments.links),
             return_exceptions=True,
         )
 
     for link, outcome in zip(arguments.links, outcomes, strict=True):
         if isinstance(outcome, BaseException):
-            print(f'failed {FileLink.parse(link).name}: {outcome}')
+            print(f'failed {link.name}: {outcome}')
         else:
             print(f'saved {outcome.path} ({outcome.inspection.kind}, notable {list(outcome.inspection.notable)})')
 
@@ -272,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.set_defaults(handler=_search)
 
     download = commands.add_parser('download', parents=[network], help='download ed2k:// file links concurrently')
-    download.add_argument('links', nargs='+', metavar='link')
+    download.add_argument(LINKS_ARGUMENT, nargs='+', metavar='link')
     content = download.add_mutually_exclusive_group()
     content.add_argument('--safe-content', action=FLAG, help='release any file except programs, scripts and macros')
     content.add_argument('--any-content', action=FLAG, help='release every file, programs included')
@@ -307,11 +309,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     arguments = build_parser().parse_args(argv)
 
-    # A malformed configuration file is a usage error, reported like any other before anything starts
+    # Every input is checked here, before any client, identity or connection exists: the configuration file, the
+    # flags and the links, which are replaced by their parsed form. Only a TOML error lacks the file in its message
     try:
         build_config(arguments)
-    except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
-        print(f'error: {arguments.config}: {error}', file=sys.stderr)
+        if LINKS_ARGUMENT in arguments:
+            arguments.links = [FileLink.parse(link) for link in arguments.links]
+    except tomllib.TOMLDecodeError as error:
+        print(f'{ERROR_PREFIX}{arguments.config}: {error}', file=sys.stderr)
+        return USAGE_ERROR
+    except (OSError, TypeError, ValueError, Ed2kError) as error:
+        print(f'{ERROR_PREFIX}{error}', file=sys.stderr)
         return USAGE_ERROR
 
     logging.basicConfig(level=logging.DEBUG if arguments.verbose else logging.INFO, format=LOG_FORMAT)
@@ -321,6 +329,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             asyncio.run(arguments.handler(arguments))
     except Ed2kError as error:
-        print(f'error: {error}', file=sys.stderr)
+        print(f'{ERROR_PREFIX}{error}', file=sys.stderr)
         return 1
     return 0
