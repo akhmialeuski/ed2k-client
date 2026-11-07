@@ -26,7 +26,11 @@ FAST = DownloadSettings(max_peers=4, queue_wait=10.0, reask_interval=1.0, source
 
 
 def free_port() -> int:
-    """Return a TCP port that is free on loopback right now."""
+    """Return a TCP port that is free on loopback right now.
+
+    :returns: the port.
+    :rtype: int
+    """
     with socket.socket() as probe:
         probe.bind((LOOPBACK, 0))
         port: int = probe.getsockname()[1]
@@ -34,7 +38,17 @@ def free_port() -> int:
 
 
 def make_config(root: Path, name: str, **overrides: object) -> ClientConfig:
-    """Build a client config that keeps every file under ``root / name``."""
+    """Build a client config that keeps every file under ``root / name``.
+
+    :param root: the directory under which every client keeps its files.
+    :type root: Path
+    :param name: the client, which names its directory.
+    :type name: str
+    :param overrides: fields of ClientConfig that replace the defaults.
+    :type overrides: object
+    :returns: the config.
+    :rtype: ClientConfig
+    """
     config = ClientConfig(
         state_dir=root / name / 'state',
         download_dir=root / name / 'downloads',
@@ -47,12 +61,30 @@ def make_config(root: Path, name: str, **overrides: object) -> ClientConfig:
 
 
 def compressible(size: int, *, header: bytes = PDF_HEADER) -> bytes:
-    """Bytes that start with a document header and compress well."""
+    """Bytes that start with a document header and compress well.
+
+    :param size: the length in bytes.
+    :type size: int
+    :param header: the leading bytes.
+    :type header: bytes
+    :returns: the bytes.
+    :rtype: bytes
+    """
     return (header + PATTERN * (size // len(PATTERN) + 1))[:size]
 
 
 def incompressible(size: int, *, header: bytes = PDF_HEADER, seed: int = 7) -> bytes:
-    """Bytes that do not compress, so blocks travel raw; a PDF wraps them in a stream object as real PDFs do."""
+    """Bytes that do not compress, so blocks travel raw; a PDF wraps them in a stream object as real PDFs do.
+
+    :param size: the length in bytes.
+    :type size: int
+    :param header: the leading bytes.
+    :type header: bytes
+    :param seed: the seed of the random bytes.
+    :type seed: int
+    :returns: the bytes.
+    :rtype: bytes
+    """
     noise = random.Random(seed).randbytes(size)
     if header != PDF_HEADER:
         return (header + noise)[:size]
@@ -63,14 +95,30 @@ def incompressible(size: int, *, header: bytes = PDF_HEADER, seed: int = 7) -> b
 
 
 def write_file(path: Path, data: bytes) -> Path:
-    """Write ``data`` to ``path``, creating the parent directory."""
+    """Write ``data`` to ``path``, creating the parent directory.
+
+    :param path: the file.
+    :type path: Path
+    :param data: the bytes.
+    :type data: bytes
+    :returns: the path.
+    :rtype: Path
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path
 
 
 def source_of(seeder: Client, *, obfuscate: bool = False) -> Source:
-    """Describe a sharing client as a High ID source on loopback."""
+    """Describe a sharing client as a High ID source on loopback.
+
+    :param seeder: the sharing client.
+    :type seeder: Client
+    :param obfuscate: whether the source asks for an obfuscated connection.
+    :type obfuscate: bool
+    :returns: the source.
+    :rtype: Source
+    """
     assert seeder.listening_port is not None
     return Source(
         client_id=client_id_from_host(LOOPBACK),
@@ -97,10 +145,25 @@ class ServeSpy:
     _ranges: list[tuple[int, int]] = field(default_factory=list)
 
     def install(self, library: SharedLibrary) -> None:
-        """Wrap the library's read method."""
+        """Wrap the library's read method.
+
+        :param library: the library whose reads are spied on.
+        :type library: SharedLibrary
+        """
         original = library.read
 
         def read(*, shared: SharedFile, start: int, end: int) -> bytes:
+            """Read through the library, let the hook change the bytes and count them.
+
+            :param shared: the file read.
+            :type shared: SharedFile
+            :param start: the first offset.
+            :type start: int
+            :param end: the offset after the last byte.
+            :type end: int
+            :returns: the bytes served.
+            :rtype: bytes
+            """
             data = original(shared=shared, start=start, end=end)
             if self.hook is not None:
                 data = self.hook(shared, start, end, data)
@@ -112,16 +175,47 @@ class ServeSpy:
 
 
 def corrupting(shared: SharedFile, start: int, end: int, data: bytes) -> bytes:
-    """Flip every byte, as a hostile or broken peer would."""
+    """Flip every byte, as a hostile or broken peer would.
+
+    :param shared: the file read.
+    :type shared: SharedFile
+    :param start: the first offset.
+    :type start: int
+    :param end: the offset after the last byte.
+    :type end: int
+    :param data: the true bytes.
+    :type data: bytes
+    :returns: the flipped bytes.
+    :rtype: bytes
+    """
     del shared, start, end
     return bytes(byte ^ 0xFF for byte in data)
 
 
 def failing_after(limit: int) -> ReadHook:
-    """Serve ``limit`` bytes, then behave as if the file vanished from disk."""
+    """Serve ``limit`` bytes, then behave as if the file vanished from disk.
+
+    :param limit: the bytes served before the file vanishes.
+    :type limit: int
+    :returns: the hook.
+    :rtype: ReadHook
+    """
     sent = 0
 
     def hook(shared: SharedFile, start: int, end: int, data: bytes) -> bytes:
+        """Pass bytes through until the limit, then raise as a vanished file does.
+
+        :param shared: the file read.
+        :type shared: SharedFile
+        :param start: the first offset.
+        :type start: int
+        :param end: the offset after the last byte.
+        :type end: int
+        :param data: the true bytes.
+        :type data: bytes
+        :returns: the bytes, unchanged.
+        :rtype: bytes
+        """
         nonlocal sent
         del shared, start, end
         if sent >= limit:

@@ -74,6 +74,15 @@ class IndexedFile:
 
 
 def _boolean(reader: Reader, item: IndexedFile) -> bool:
+    """Evaluate a boolean node: its operator, then both of its operands.
+
+    :param reader: the tree reader, positioned at the node.
+    :type reader: Reader
+    :param item: the indexed file.
+    :type item: IndexedFile
+    :returns: whether the node matches.
+    :rtype: bool
+    """
     operator = reader.u8()
     left, right = evaluate(reader, item), evaluate(reader, item)
     if operator == BooleanOperator.AND:
@@ -82,10 +91,28 @@ def _boolean(reader: Reader, item: IndexedFile) -> bool:
 
 
 def _keyword(reader: Reader, item: IndexedFile) -> bool:
+    """Match a keyword node against the file name, ignoring case.
+
+    :param reader: the tree reader, positioned at the node.
+    :type reader: Reader
+    :param item: the indexed file.
+    :type item: IndexedFile
+    :returns: whether the name contains the keyword.
+    :rtype: bool
+    """
     return reader.string().lower() in item.name.lower()
 
 
 def _string_tag(reader: Reader, item: IndexedFile) -> bool:
+    """Match a string tag node: the extension against the name, or the server-side file type.
+
+    :param reader: the tree reader, positioned at the node.
+    :type reader: Reader
+    :param item: the indexed file.
+    :type item: IndexedFile
+    :returns: whether the tag matches.
+    :rtype: bool
+    """
     value, tag = reader.string(), reader.take(reader.u16())[0]
     if tag == FileTag.FORMAT:
         return item.name.lower().endswith('.' + value.lower())
@@ -93,6 +120,17 @@ def _string_tag(reader: Reader, item: IndexedFile) -> bool:
 
 
 def _number(reader: Reader, item: IndexedFile, *, wide: bool) -> bool:
+    """Compare the size or the source count of a file with a numeric node.
+
+    :param reader: the tree reader, positioned at the node.
+    :type reader: Reader
+    :param item: the indexed file.
+    :type item: IndexedFile
+    :param wide: whether the bound is a 64-bit number.
+    :type wide: bool
+    :returns: whether the comparison holds.
+    :rtype: bool
+    """
     value = reader.u64() if wide else reader.u32()
     operator, tag = reader.u8(), reader.take(reader.u16())[0]
     actual = item.size if tag == FileTag.SIZE else len(item.sources)
@@ -109,7 +147,15 @@ NODE_EVALUATORS: dict[int, Callable[[Reader, IndexedFile], bool]] = {
 
 
 def evaluate(reader: Reader, item: IndexedFile) -> bool:
-    """Evaluate one node of a search tree, consuming exactly its bytes, both operands always."""
+    """Evaluate one node of a search tree, consuming exactly its bytes, both operands always.
+
+    :param reader: the tree reader, positioned at the node.
+    :type reader: Reader
+    :param item: the indexed file.
+    :type item: IndexedFile
+    :returns: whether the file matches the node.
+    :rtype: bool
+    """
     return NODE_EVALUATORS[reader.u8()](reader, item)
 
 
@@ -135,10 +181,15 @@ class FakeServer:
     :ivar files: the index.
     :ivar sessions: logged-in clients by ID.
     :ivar searches: the number of searches answered.
+    :ivar port: the TCP port it listens on, 0 until it starts.
     """
 
     def __init__(self, *, low_id: bool = False) -> None:
-        """Prepare the server; ``low_id`` gives every client a Low ID, as when the server cannot reach it."""
+        """Prepare the server; ``low_id`` gives every client a Low ID, as when the server cannot reach it.
+
+        :param low_id: whether every client gets a Low ID, as when the server cannot reach it.
+        :type low_id: bool
+        """
         self._low_id = low_id
         self._next_low_id = 1000
         self.files: dict[Ed2kHash, IndexedFile] = {}
@@ -149,7 +200,11 @@ class FakeServer:
         self.port = 0
 
     async def __aenter__(self) -> Self:
-        """Start listening on a free loopback port."""
+        """Start listening on a free loopback port.
+
+        :returns: the server.
+        :rtype: Self
+        """
         self._server = await asyncio.start_server(self._handle, LOOPBACK, 0)
         self.port = self._server.sockets[0].getsockname()[1]
         return self
@@ -157,7 +212,15 @@ class FakeServer:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
-        """Stop listening and drop every client."""
+        """Stop listening and drop every client.
+
+        :param exc_type: the exception type, if any.
+        :type exc_type: type[BaseException] | None
+        :param exc: the exception, if any.
+        :type exc: BaseException | None
+        :param traceback: the traceback, if any.
+        :type traceback: TracebackType | None
+        """
         if self._server is not None:
             self._server.close()
             self._server.close_clients()
@@ -169,6 +232,13 @@ class FakeServer:
         return ServerEntry(host=LOOPBACK, port=self.port, name='fake')
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Serve one client connection until it closes or breaks the protocol.
+
+        :param reader: the connection reader.
+        :type reader: asyncio.StreamReader
+        :param writer: the connection writer.
+        :type writer: asyncio.StreamWriter
+        """
         stream = PacketStream(reader=reader, writer=writer, options=SERVER_SIDE)
         logged_in: list[Session] = []
         try:
@@ -181,6 +251,13 @@ class FakeServer:
             await stream.close()
 
     async def _converse(self, stream: PacketStream, logged_in: list[Session]) -> None:
+        """Read packets, logging the client in first and serving its requests afterwards.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param logged_in: the sessions of this connection, extended by a login.
+        :type logged_in: list[Session]
+        """
         while True:
             packet = await stream.read_packet()
             if packet.opcode == ServerOp.LOGINREQUEST:
@@ -189,11 +266,24 @@ class FakeServer:
                 await self._serve(logged_in[-1], packet.opcode, packet.reader())
 
     async def wait_for_files(self, count: int) -> None:
-        """Wait until clients have offered ``count`` files."""
+        """Wait until clients have offered ``count`` files.
+
+        :param count: the number of files to wait for.
+        :type count: int
+        """
         async with self._changed:
             await self._changed.wait_for(lambda: len(self.files) >= count)
 
     async def _login(self, stream: PacketStream, reader: Reader) -> Session:
+        """Assign an ID and answer with the welcome message, the ID and the status.
+
+        :param stream: the connection.
+        :type stream: PacketStream
+        :param reader: the login request body.
+        :type reader: Reader
+        :returns: the new session.
+        :rtype: Session
+        """
         user_hash, _, port = reader.hash16(), reader.u32(), reader.u16()
         read_tags(reader)
         if self._low_id:
@@ -213,6 +303,15 @@ class FakeServer:
         return session
 
     async def _serve(self, session: Session, opcode: int, reader: Reader) -> None:
+        """Answer one request of a logged-in client.
+
+        :param session: the client that asked.
+        :type session: Session
+        :param opcode: the request opcode.
+        :type opcode: int
+        :param reader: the request body.
+        :type reader: Reader
+        """
         match opcode:
             case ServerOp.OFFERFILES:
                 for _ in range(reader.u32()):
@@ -239,6 +338,13 @@ class FakeServer:
                 pass
 
     async def _search(self, session: Session, tree: bytes) -> None:
+        """Answer a search with one zlib-packed page of every matching file.
+
+        :param session: the client that asked.
+        :type session: Session
+        :param tree: the binary search tree.
+        :type tree: bytes
+        """
         self.searches += 1
         matches = [item for item in self.files.values() if evaluate(Reader(tree), item)]
         page = Writer().u32(len(matches))
@@ -251,6 +357,13 @@ class FakeServer:
         await session.stream.send(protocol=Protocol.PACKED, opcode=ServerOp.SEARCHRESULT, payload=payload)
 
     async def _sources(self, session: Session, file_hash: Ed2kHash) -> None:
+        """Answer a source request with every client that offered the file.
+
+        :param session: the client that asked.
+        :type session: Session
+        :param file_hash: the file.
+        :type file_hash: Ed2kHash
+        """
         item = self.files.get(file_hash)
         if item is None:
             return
@@ -264,7 +377,17 @@ class FakeServer:
 
 
 def write_contact(writer: Writer, *, kad_id: KadId, host: str, udp_port: int) -> None:
-    """Append the 25-byte Kad contact record."""
+    """Append the 25-byte Kad contact record.
+
+    :param writer: the payload writer.
+    :type writer: Writer
+    :param kad_id: the node ID.
+    :type kad_id: KadId
+    :param host: the IPv4 address.
+    :type host: str
+    :param udp_port: the UDP port.
+    :type udp_port: int
+    """
     kad_id.write(writer).u32(int(ipaddress.IPv4Address(host))).u16(udp_port).u16(0).u8(KAD_VERSION)
 
 
@@ -278,6 +401,7 @@ class FakeKadNode(asyncio.DatagramProtocol):
     :ivar sources: file target to ``(user hash, tags)`` entries.
     :ivar received: the number of datagrams it got.
     :ivar port: its UDP port.
+    :ivar transport: its socket, once open.
     """
 
     kad_id: KadId
@@ -289,17 +413,39 @@ class FakeKadNode(asyncio.DatagramProtocol):
     transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        """Remember the socket."""
+        """Remember the socket.
+
+        :param transport: the socket.
+        :type transport: asyncio.BaseTransport
+        """
         assert isinstance(transport, asyncio.DatagramTransport)
         self.transport = transport
         self.port = transport.get_extra_info('sockname')[1]
 
     def _with_contacts(self, writer: Writer, nodes: list[FakeKadNode]) -> bytes:
+        """Append the contact records of some nodes to an answer.
+
+        :param writer: the answer being built.
+        :type writer: Writer
+        :param nodes: the nodes to list.
+        :type nodes: list[FakeKadNode]
+        :returns: the answer body.
+        :rtype: bytes
+        """
         for node in nodes:
             write_contact(writer, kad_id=node.kad_id, host=LOOPBACK, udp_port=node.port)
         return writer.getvalue()
 
     def _answer(self, opcode: int, reader: Reader) -> tuple[int, bytes] | None:
+        """Answer a bootstrap, a lookup or a search the way a Kad 2 node does, or not at all.
+
+        :param opcode: the request opcode.
+        :type opcode: int
+        :param reader: the request body.
+        :type reader: Reader
+        :returns: the answer opcode and body, or ``None`` to stay silent.
+        :rtype: tuple[int, bytes] | None
+        """
         if opcode == KadOp.BOOTSTRAP_REQ:
             others = [node for node in self.network if node is not self][:MAX_BOOTSTRAP_CONTACTS]
             return KadOp.BOOTSTRAP_RES, self._with_contacts(
@@ -322,7 +468,13 @@ class FakeKadNode(asyncio.DatagramProtocol):
         return KadOp.SEARCH_RES, writer.getvalue()
 
     def datagram_received(self, data: bytes, addr: tuple[str | int, int]) -> None:
-        """Answer the Kad 2 requests a searching client sends."""
+        """Answer the Kad 2 requests a searching client sends.
+
+        :param data: the datagram.
+        :type data: bytes
+        :param addr: the sender.
+        :type addr: tuple[str | int, int]
+        """
         self.received += 1
         packet = decode_udp(data)
         answer = self._answer(packet.opcode, packet.reader())
@@ -357,12 +509,27 @@ class FakeKadNetwork:
     """
 
     def __init__(self, *, size: int = 10, seed: int = 3) -> None:
-        """Prepare ``size`` random node IDs from ``seed``."""
+        """Prepare ``size`` random node IDs from ``seed``.
+
+        :param size: the number of nodes.
+        :type size: int
+        :param seed: the seed of the random node IDs.
+        :type seed: int
+        """
         self._random = random.Random(seed)
         self.nodes: list[FakeKadNode] = []
         self._ids = [KadId(self._random.getrandbits(128)) for _ in range(size)]
 
     async def _add(self, kad_id: KadId, *, kind: type[FakeKadNode] = FakeKadNode) -> FakeKadNode:
+        """Open a node socket on loopback and add the node to the network.
+
+        :param kad_id: the node ID.
+        :type kad_id: KadId
+        :param kind: the class of the node.
+        :type kind: type[FakeKadNode]
+        :returns: the node.
+        :rtype: FakeKadNode
+        """
         node = kind(kad_id=kad_id, network=self.nodes)
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: node, local_addr=(LOOPBACK, 0))
         self.nodes.append(node)
@@ -379,7 +546,11 @@ class FakeKadNetwork:
         return await self._add(KadId(target.value ^ 1), kind=MalformingKadNode)
 
     async def __aenter__(self) -> Self:
-        """Open every node's socket."""
+        """Open every node's socket.
+
+        :returns: the network.
+        :rtype: Self
+        """
         for kad_id in self._ids:
             await self._add(kad_id)
         return self
@@ -387,17 +558,42 @@ class FakeKadNetwork:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
     ) -> None:
-        """Close every node's socket."""
+        """Close every node's socket.
+
+        :param exc_type: the exception type, if any.
+        :type exc_type: type[BaseException] | None
+        :param exc: the exception, if any.
+        :type exc: BaseException | None
+        :param traceback: the traceback, if any.
+        :type traceback: TracebackType | None
+        """
         for node in self.nodes:
             if node.transport is not None:
                 node.transport.close()
 
     async def _responsible(self, target: KadId) -> list[FakeKadNode]:
+        """Find the nodes in the tolerance zone of a target, adding one when none is.
+
+        :param target: the target.
+        :type target: KadId
+        :returns: the responsible nodes.
+        :rtype: list[FakeKadNode]
+        """
         inside = [node for node in self.nodes if node.kad_id.distance(target) < TOLERANCE]
         return inside or [await self._add(KadId(target.value ^ self._random.getrandbits(100)))]
 
     async def publish_keyword(self, word: str, *, file_hash: Ed2kHash, name: str, size: int) -> None:
-        """Index a file under a keyword on the nodes responsible for the keyword."""
+        """Index a file under a keyword on the nodes responsible for the keyword.
+
+        :param word: the keyword.
+        :type word: str
+        :param file_hash: the file.
+        :type file_hash: Ed2kHash
+        :param name: the published file name.
+        :type name: str
+        :param size: the file size in bytes.
+        :type size: int
+        """
         target = KadId.from_digest(md4(word.lower().encode()))
         tags = [Tag(FileTag.NAME, name), Tag(FileTag.SIZE, size), Tag(FileTag.SOURCES, 1)]
         for node in await self._responsible(target):
@@ -406,7 +602,19 @@ class FakeKadNetwork:
     async def publish_source(
         self, file_hash: Ed2kHash, *, port: int, user_hash: bytes, source_type: int = 1, source_ip: int = LOOPBACK_IP
     ) -> None:
-        """Index a peer as a source of a file, on loopback unless ``source_ip`` says otherwise."""
+        """Index a peer as a source of a file, on loopback unless ``source_ip`` says otherwise.
+
+        :param file_hash: the file.
+        :type file_hash: Ed2kHash
+        :param port: the TCP port of the source.
+        :type port: int
+        :param user_hash: the user hash of the source.
+        :type user_hash: bytes
+        :param source_type: the Kad source type, 1 for a directly reachable peer.
+        :type source_type: int
+        :param source_ip: the address of the source as a number.
+        :type source_ip: int
+        """
         target = KadId.from_digest(file_hash.digest)
         tags = [
             Tag(FileTag.SOURCE_TYPE, source_type),
@@ -418,7 +626,15 @@ class FakeKadNetwork:
             node.sources.setdefault(target, []).append((user_hash, tags))
 
     def write_nodes_dat(self, path: Path, *, count: int = 3) -> Path:
-        """Write a version 2 ``nodes.dat`` that lists the first ``count`` nodes."""
+        """Write a version 2 ``nodes.dat`` that lists the first ``count`` nodes.
+
+        :param path: the file to write.
+        :type path: Path
+        :param count: how many of the first nodes to list.
+        :type count: int
+        :returns: the path written.
+        :rtype: Path
+        """
         writer = Writer().raw(struct.pack('<III', 0, 2, count))
         for node in self.nodes[:count]:
             write_contact(writer, kad_id=node.kad_id, host=LOOPBACK, udp_port=node.port)
