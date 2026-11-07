@@ -38,6 +38,8 @@ FLAG: str = 'store_true'
 USAGE_ERROR: int = 2
 ERROR_PREFIX: str = 'error: '
 LINKS_ARGUMENT: str = 'links'
+PATH_ARGUMENT: str = 'path'
+PATHS_ARGUMENT: str = 'paths'
 
 # Network flags and the settings they override, at the top level of ClientConfig and inside its timeouts
 CONFIG_FLAGS: tuple[tuple[str, str], ...] = (
@@ -283,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.set_defaults(handler=_download)
 
     share = commands.add_parser('share', parents=[network], help='share a file or directory for a while')
-    share.add_argument('path')
+    share.add_argument(PATH_ARGUMENT)
     share.add_argument('--seconds', type=float, default=SECONDS_PER_HOUR)
     share.add_argument('--upload-slots', type=int, help='peers served at the same time')
     share.set_defaults(handler=_share)
@@ -294,9 +296,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     # servers and hash run without an event loop, because they do no asynchronous work
     file_hash = commands.add_parser('hash', help='print the ed2k link of local files')
-    file_hash.add_argument('paths', nargs='+')
+    file_hash.add_argument(PATHS_ARGUMENT, nargs='+')
     file_hash.set_defaults(handler=_hash, sync=True)
     return parser
+
+
+def _check_local_paths(arguments: argparse.Namespace, config: ClientConfig) -> None:
+    """Refuse a local file or directory that the command line or the settings name and that does not exist.
+
+    :param arguments: the parsed command line.
+    :type arguments: argparse.Namespace
+    :param config: the settings built from the configuration file and the flags.
+    :type config: ClientConfig
+    :raises FileNotFoundError: for the first path that does not exist.
+    """
+    named = [
+        *getattr(arguments, PATHS_ARGUMENT, ()),
+        getattr(arguments, PATH_ARGUMENT, None),
+        config.nodes_dat,
+        config.ip_filter,
+    ]
+    for path in (Path(item) for item in named if item is not None):
+        if not path.exists():
+            err_msg = f'no such file or directory: {path}'
+            raise FileNotFoundError(err_msg)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -310,9 +333,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
 
     # Every input is checked here, before any client, identity or connection exists: the configuration file, the
-    # flags and the links, which are replaced by their parsed form. Only a TOML error lacks the file in its message
+    # flags, the local paths and the links, which are replaced by their parsed form. Only a TOML error lacks the file
+    # in its message
     try:
-        build_config(arguments)
+        _check_local_paths(arguments, build_config(arguments))
         if LINKS_ARGUMENT in arguments:
             arguments.links = [FileLink.parse(link) for link in arguments.links]
     except tomllib.TOMLDecodeError as error:

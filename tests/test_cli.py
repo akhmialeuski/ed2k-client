@@ -1,4 +1,4 @@
-"""Unit tests of the command line: input errors are reported before anything starts."""
+"""Tests of the command line: input errors are reported before anything starts."""
 
 from typing import TYPE_CHECKING
 
@@ -8,10 +8,15 @@ from ed2k_client.cli import USAGE_ERROR, main
 from ed2k_client.client import DEFAULT_STATE_DIR
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pyfakefs.fake_filesystem import FakeFilesystem
 
 OFFLINE = ['--no-server', '--no-kad']
 SEARCH = ['search', 'kademlia']
+MISSING = '/missing/book.pdf'
+NO_SUCH_PATH = 'error: no such file or directory: '
+MISSING_NAME = 'missing.dat'
 
 
 @pytest.mark.usefixtures('fs')
@@ -54,3 +59,68 @@ class TestMain:
 
         assert code == USAGE_ERROR
         assert not fs.exists(DEFAULT_STATE_DIR)
+
+    @pytest.mark.parametrize(
+        'arguments',
+        [['hash', MISSING], ['share', MISSING, '--seconds', '0', '--port', '0', *OFFLINE]],
+        ids=['hashed file', 'shared path'],
+    )
+    def test_missing_path_argument_is_a_usage_error(
+        self, capsys: pytest.CaptureFixture[str], arguments: list[str]
+    ) -> None:
+        """A file or directory argument that does not exist is reported in one line before any client starts.
+
+        Without the check, hash ends in a traceback and share keeps its listener open for the whole sharing time with
+        nothing to share.
+
+        :param capsys: the captured output.
+        :type capsys: pytest.CaptureFixture[str]
+        :param arguments: the command line naming the missing path.
+        :type arguments: list[str]
+        """
+        code = main(arguments)
+
+        assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'{NO_SUCH_PATH}{MISSING}\n')
+
+
+@pytest.mark.integration
+class TestMainPathSettings:
+    """Tests of :func:`main` with path settings, in a temporary directory.
+
+    pyfakefs replaces ``Path`` in every module with an object that is not a class, so the settings conversion, which
+    turns a string into a path only for a ``Path`` class, refuses every path setting on the in-memory file system.
+    """
+
+    def test_missing_nodes_dat_flag_is_a_usage_error(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A nodes.dat flag naming a missing file is reported in one line instead of failing once Kad starts.
+
+        :param tmp_path: the directory that holds the state and lacks the nodes.dat.
+        :type tmp_path: Path
+        :param capsys: the captured output.
+        :type capsys: pytest.CaptureFixture[str]
+        """
+        missing = tmp_path / MISSING_NAME
+
+        code = main([*SEARCH, '--nodes-dat', str(missing), '--no-server', '--state-dir', str(tmp_path)])
+
+        assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'{NO_SUCH_PATH}{missing}\n')
+
+    def test_missing_ip_filter_in_the_config_is_a_usage_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An IP filter that the configuration file names but that does not exist is reported in one line.
+
+        Without the check the client reads the filter while it starts, and the error leaves as a traceback.
+
+        :param tmp_path: the directory that holds the state and the configuration file and lacks the filter.
+        :type tmp_path: Path
+        :param capsys: the captured output.
+        :type capsys: pytest.CaptureFixture[str]
+        """
+        missing = tmp_path / MISSING_NAME
+        config = tmp_path / 'ed2k.toml'
+        config.write_text(f"state_dir = '{tmp_path}'\nip_filter = '{missing}'\n", encoding='utf-8')
+
+        code = main(['--config', str(config), *SEARCH, *OFFLINE])
+
+        assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'{NO_SUCH_PATH}{missing}\n')
