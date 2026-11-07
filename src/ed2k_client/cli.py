@@ -47,6 +47,7 @@ CONFIG_FLAGS: tuple[tuple[str, str], ...] = (
     ('state_dir', 'state_dir'),
     ('download_dir', 'download_dir'),
     ('nodes_dat', 'nodes_dat'),
+    ('server_met', 'server_met'),
     ('port', 'tcp_port'),
     ('udp_port', 'udp_port'),
 )
@@ -123,7 +124,7 @@ def _apply_network_flags(config: ClientConfig, arguments: argparse.Namespace) ->
 
 
 async def _connect(client: Client, arguments: argparse.Namespace) -> None:
-    """Connect to the server and Kad unless the command line skips them, reporting on stderr.
+    """Connect to the servers and Kad unless the command line skips them, reporting on stderr.
 
     :param client: the client.
     :type client: Client
@@ -131,9 +132,8 @@ async def _connect(client: Client, arguments: argparse.Namespace) -> None:
     :type arguments: argparse.Namespace
     """
     if not arguments.no_server:
-        status = await client.connect()
-        address = status.server.address if status.server else '-'
-        print(f'server {address} id {status.client_id} low_id {status.low_id}', file=sys.stderr)
+        for session in (await client.connect()).servers:
+            print(f'server {session.server.address} id {session.client_id} low_id {session.low_id}', file=sys.stderr)
     if not arguments.no_kad:
         print(f'kad contacts {await client.connect_kad()}', file=sys.stderr)
 
@@ -233,13 +233,16 @@ async def _share(arguments: argparse.Namespace) -> None:
 
 
 def _servers(arguments: argparse.Namespace) -> None:
-    """Run the ``servers`` command and print the server list by users.
+    """Run the ``servers`` command, print the server list by users and save it when asked to.
 
     :param arguments: the parsed command line.
     :type arguments: argparse.Namespace
     """
     config = build_config(arguments)
-    servers = ServerList.download(arguments.url, limits=config.limits, timeout=config.timeouts.bootstrap_fetch)
+    save_to = Path(arguments.save) if arguments.save else None
+    servers = ServerList.download(
+        arguments.url, limits=config.limits, timeout=config.timeouts.bootstrap_fetch, save_to=save_to
+    )
     for server in servers.by_users():
         print(f'{server.address:22} {server.users:7} users {server.files:10} files  {server.name}')
 
@@ -274,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     network.add_argument('--download-dir', help='finished downloads')
     network.add_argument('--server', help='ed2k://|server|ip|port|/ to use instead of the list')
     network.add_argument('--nodes-dat', help='local nodes.dat instead of the download')
+    network.add_argument('--server-met', help='local server.met instead of the download, see servers --save')
     network.add_argument('--port', type=int, help='TCP port to announce and to listen on, 0 for any free port')
     network.add_argument('--udp-port', type=int, help='local Kad UDP port, 0 for any free port')
     network.add_argument('--no-server', action=FLAG, help='skip the eD2k server')
@@ -305,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     servers = commands.add_parser('servers', help='list the servers of a server.met')
     servers.add_argument('--url', default=DEFAULT_SERVER_MET_URL)
+    servers.add_argument('--save', metavar='FILE', help='also save the downloaded server.met to this file')
     servers.set_defaults(handler=_servers, sync=True)
 
     # servers and hash run without an event loop, because they do no asynchronous work
@@ -328,6 +333,7 @@ def _check_local_paths(arguments: argparse.Namespace, config: ClientConfig) -> N
         *getattr(arguments, PATHS_ARGUMENT, ()),
         getattr(arguments, PATH_ARGUMENT, None),
         config.nodes_dat,
+        config.server_met,
         config.ip_filter,
     ]
     for path in (Path(item) for item in named if item is not None):

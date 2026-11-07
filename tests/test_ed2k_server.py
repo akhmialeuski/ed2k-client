@@ -16,6 +16,7 @@ from ed2k_client.identity import Identity
 from ed2k_client.partfile import blocks_of_part
 from ed2k_client.peer import LocalPeer, PeerConnection, build_hello, parse_hello
 from ed2k_client.server import LoginDetails, ServerSession
+from ed2k_client.servermet import ServerMemory
 from ed2k_client.transport import PacketStream
 from tests.fakes import WELCOME, FakeServer
 from tests.helpers import (
@@ -44,6 +45,9 @@ ATLAS = 'Kademlia Atlas.djvu'
 LEAFLET = 'Small Kademlia Leaflet.pdf'
 SHELF_SIZE = 4
 WAIT_LIMIT = 10.0
+FIRST_BOOK = 'Kademlia First Steps.pdf'
+SECOND_BOOK = 'Kademlia Second Thoughts.pdf'
+SMALL_BOOK = 5_000
 
 
 def library(root: Path) -> Path:
@@ -115,11 +119,11 @@ class TestConnect:
         :type low_id: bool
         """
         async with FakeServer(low_id=low_id) as server, Client(make_config(tmp_path, SEEDER)) as client:
-            status = await client.connect(server.entry)
+            (session,) = (await client.connect(server.entry)).servers
 
-            assert status.low_id is low_id
-            assert status.server == server.entry
-            assert client.status.client_id == next(iter(server.sessions))
+            assert session.low_id is low_id
+            assert session.server == server.entry
+            assert session.client_id == next(iter(server.sessions))
 
     async def test_port_zero_announces_the_bound_port(self, tmp_path: Path) -> None:
         """A client configured with port 0 tells the server the port its listener got, never 0.
@@ -146,8 +150,7 @@ class TestConnect:
         """
         async with FakeServer() as server, Client(make_config(tmp_path, LEECHER)) as client:
             await client.connect(server.entry)
-            session = client._server
-            assert session is not None
+            (session,) = client._servers
             assert WELCOME in session.state.messages
 
     async def test_login_fails_at_once_when_the_server_hangs_up(self) -> None:
@@ -191,6 +194,41 @@ class TestConnect:
 
             assert await client.search(KEYWORD) == []
 
+    async def test_sessions_open_on_several_servers_up_to_the_setting(self, tmp_path: Path) -> None:
+        """Logins run in parallel until the configured number of sessions is open, past a server that refuses.
+
+        Only the servers that accepted are remembered, the one that answered last first.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        async with AsyncExitStack() as stack:
+            first, second, third = [await stack.enter_async_context(FakeServer()) for _ in range(3)]
+            refusing = ServerEntry(host=LOOPBACK, port=free_port())
+            servers = (refusing, first.entry, second.entry, third.entry)
+            config = make_config(tmp_path, LEECHER, servers=servers, server_sessions=2)
+            client = await stack.enter_async_context(Client(config))
+            status = await client.connect()
+
+        assert [session.server for session in status.servers] == [first.entry, second.entry]
+        assert ServerMemory.load(config.state_dir).addresses == [second.entry.address, first.entry.address]
+
+    async def test_remembered_server_is_tried_first(self, tmp_path: Path) -> None:
+        """A server that accepted a login before is tried ahead of the configured order.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        async with AsyncExitStack() as stack:
+            first, second = [await stack.enter_async_context(FakeServer()) for _ in range(2)]
+            config = make_config(tmp_path, LEECHER, servers=(first.entry, second.entry), server_sessions=1)
+            config.state_dir.mkdir(parents=True)
+            ServerMemory.load(config.state_dir).remember(second.entry)
+            client = await stack.enter_async_context(Client(config))
+            status = await client.connect()
+
+        assert [session.server for session in status.servers] == [second.entry]
+
 
 class TestSearch:
     """Tests of :meth:`Client.search` through a server."""
@@ -214,6 +252,35 @@ class TestSearch:
         assert sorted(result.name for result in large) == sorted([BOOK, ATLAS])
         assert all(result.sources == 1 for result in books)
         assert server.searches == 2
+
+    async def test_every_server_is_searched_and_asked_for_sources(self, tmp_path: Path) -> None:
+        """A book known to one server and a book known to another are both found, each with its own source.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        # Sizes differ, because equal content would give both books one hash and so one merged result
+        books = [
+            write_file(tmp_path / name / name, compressible(SMALL_BOOK + index))
+            for index, name in enumerate((FIRST_BOOK, SECOND_BOOK))
+        ]
+        async with AsyncExitStack() as stack:
+            servers = [await stack.enter_async_context(FakeServer()) for _ in books]
+            for server, book in zip(servers, books, strict=True):
+                config = make_config(tmp_path, book.stem, servers=(server.entry,), tcp_port=free_port())
+                seeder = await stack.enter_async_context(Client(config))
+                await seeder.connect()
+                await seeder.share(book)
+                async with asyncio.timeout(WAIT_LIMIT):
+                    await server.wait_for_files(1)
+            entries = tuple(server.entry for server in servers)
+            leecher = await stack.enter_async_context(Client(make_config(tmp_path, LEECHER, servers=entries)))
+            await leecher.connect()
+            results = await leecher.search(KEYWORD)
+            sources = [await leecher.find_sources(file_hash=result.file_hash, size=result.size) for result in results]
+
+        assert sorted(result.name for result in results) == [FIRST_BOOK, SECOND_BOOK]
+        assert [len(found) for found in sources] == [1, 1]
 
 
 class TestDownload:
@@ -299,7 +366,7 @@ class TestShare:
         async with AsyncExitStack() as stack:
             server = await stack.enter_async_context(FakeServer(low_id=True))
             seeder = await stack.enter_async_context(Client(make_config(tmp_path, SEEDER, servers=(server.entry,))))
-            await seeder.connect()
+            (seeder_session,) = (await seeder.connect()).servers
             await seeder.share(shelf)
             listener = await asyncio.start_server(act_as_remote_peer, LOOPBACK, 0)
             stack.push_async_callback(listener.wait_closed)
@@ -312,8 +379,28 @@ class TestShare:
                     ),
                 )
             )
-            await requester.request_callback(seeder.status.client_id)
+            await requester.request_callback(seeder_session.client_id)
             data = await asyncio.wait_for(received, WAIT_LIMIT)
 
-        assert seeder.status.low_id
+        assert seeder_session.low_id
         assert data == (shelf / BOOK).read_bytes()[first_block.start : first_block.end]
+
+    async def test_shared_files_are_published_on_every_server(self, tmp_path: Path) -> None:
+        """A seeder logged in to two servers offers its files to both, so leechers of either server find it.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        shelf = write_file(tmp_path / LIBRARY / FIRST_BOOK, compressible(SMALL_BOOK)).parent
+        async with AsyncExitStack() as stack:
+            servers = [await stack.enter_async_context(FakeServer()) for _ in range(2)]
+            entries = tuple(server.entry for server in servers)
+            seeder = await stack.enter_async_context(
+                Client(make_config(tmp_path, SEEDER, servers=entries, tcp_port=free_port()))
+            )
+            await seeder.connect()
+            await seeder.share(shelf)
+            async with asyncio.timeout(WAIT_LIMIT):
+                await asyncio.gather(*(server.wait_for_files(1) for server in servers))
+
+        assert [len(server.files) for server in servers] == [1, 1]

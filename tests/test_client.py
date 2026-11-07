@@ -1,22 +1,36 @@
-"""Unit tests of how the client treats peers that reach it, on an in-memory file system."""
+"""Unit tests of the client on an in-memory file system: peers that reach it and where it takes its server list."""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, PropertyMock, create_autospec, patch, sentinel
 
 import pytest
 
-from ed2k_client.client import Client, ClientConfig
+from ed2k_client.client import SERVER_MET_CACHE, Client, ClientConfig
 from ed2k_client.constants import PeerOp, Protocol
+from ed2k_client.servermet import ServerEntry, ServerList
 from ed2k_client.share import SharedLibrary
 from ed2k_client.transport import PacketStream
 from ed2k_client.wire import Packet
 from tests.fakes import ScriptedStream
+from tests.helpers import server_met
+
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
+    from pyfakefs.fake_filesystem import FakeFilesystem
 
 pytestmark = pytest.mark.usefixtures('fs')
 
 CONFIG = ClientConfig(state_dir=Path('/state'), download_dir=Path('/downloads'))
 PUBLIC_PEER = ('8.8.8.8', 4662)
+CACHED_LIST = CONFIG.state_dir / SERVER_MET_CACHE
+LOCAL_LIST = Path('/lists/server.met')
+OFFLINE = 'offline'
+BUSY = ServerEntry(host='203.0.113.10', port=4661, name='busy', users=900)
+QUIET = ServerEntry(host='203.0.113.20', port=4242, name='quiet', users=10)
 
 # A first byte that is no protocol byte starts an obfuscation handshake, and zeros never carry its sync value
 NOT_A_HANDSHAKE = b'\x01' + bytes(64)
@@ -67,3 +81,62 @@ class TestOnCallback:
             await client._on_callback(*PUBLIC_PEER)
 
         assert stream.closed
+
+
+class TestServerCandidates:
+    """Tests of where :meth:`Client.connect` takes the servers it tries."""
+
+    @patch.object(ServerList, 'download', side_effect=OSError(OFFLINE))
+    async def test_cached_list_stands_in_when_the_download_fails(self, download: MagicMock, fs: FakeFilesystem) -> None:
+        """A list saved by an earlier download is used when the download fails, ordered by users as always.
+
+        :param download: the mocked download, which fails as an unreachable host does.
+        :type download: MagicMock
+        :param fs: the in-memory file system that holds the cached list.
+        :type fs: FakeFilesystem
+        """
+        del download
+        client = Client(CONFIG)
+        fs.create_file(CACHED_LIST, contents=server_met([QUIET, BUSY]))
+
+        assert await client._server_candidates() == [BUSY, QUIET]
+
+    @patch.object(ServerList, 'download', side_effect=OSError(OFFLINE))
+    async def test_failed_download_without_a_cache_is_raised(self, download: MagicMock) -> None:
+        """A failed download with nothing cached is reported, since no server is known.
+
+        :param download: the mocked download, which fails as an unreachable host does.
+        :type download: MagicMock
+        """
+        del download
+        client = Client(CONFIG)
+
+        with pytest.raises(OSError, match=OFFLINE):
+            await client._server_candidates()
+
+    @patch.object(ServerList, 'download', return_value=ServerList(servers=(BUSY,)))
+    async def test_download_is_cached_in_the_state_directory(self, download: MagicMock) -> None:
+        """A successful download is asked to save itself in the state directory, where a failed one looks.
+
+        :param download: the mocked download, which returns one server.
+        :type download: MagicMock
+        """
+        client = Client(CONFIG)
+
+        assert await client._server_candidates() == [BUSY]
+        assert download.call_args.kwargs['save_to'] == CACHED_LIST
+
+    @patch.object(ServerList, 'download')
+    async def test_local_server_met_replaces_the_download(self, download: MagicMock, fs: FakeFilesystem) -> None:
+        """A configured local server.met is read instead of downloading one.
+
+        :param download: the mocked download, which must not be called.
+        :type download: MagicMock
+        :param fs: the in-memory file system that holds the local list.
+        :type fs: FakeFilesystem
+        """
+        fs.create_file(LOCAL_LIST, contents=server_met([BUSY]))
+        client = Client(replace(CONFIG, server_met=LOCAL_LIST))
+
+        assert await client._server_candidates() == [BUSY]
+        download.assert_not_called()

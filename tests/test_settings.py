@@ -161,8 +161,9 @@ class TestClientConfigFromToml:
             ('[download]\ncontent_policy = "executables"\n', ValueError),
             ('kad = 5\n', TypeError),
             ("servers = 'ed2k://|server|1.2.3.4|4661|/'\n", TypeError),
+            ('server_sessions = 0\n', ValueError),
         ],
-        ids=['zero peers', 'unknown policy', 'scalar for a table', 'text for a list'],
+        ids=['zero peers', 'unknown policy', 'scalar for a table', 'text for a list', 'no server session'],
     )
     def test_config_file_refuses_bad_values(self, fs: FakeFilesystem, contents: str, failure: type[Exception]) -> None:
         """A value the settings refuse fails when the file is read.

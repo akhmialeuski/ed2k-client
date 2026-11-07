@@ -6,6 +6,7 @@
 # state_dir = '~/.local/state/ed2k-client'
 # download_dir = '~/Downloads/ed2k'
 # servers = ['ed2k://|server|85.17.116.222|6082|/']
+# server_met = '~/server.met'
 # nodes_dat = '~/nodes.dat'
 # ip_filter = '~/ipfilter.dat'
 # allow_private_peers = false
@@ -21,6 +22,8 @@ listen_host = '0.0.0.0'
 udp_port = 4_672
 # HTTPS URL of a `server.met`.
 server_met_url = 'https://upd.emule-security.org/server.met'
+# Servers the client stays logged in to at the same time, each searched and asked for sources.
+server_sessions = 4
 # HTTPS URL of a `nodes.dat`.
 nodes_dat_url = 'https://upd.emule-security.org/nodes.dat'
 

@@ -1,14 +1,17 @@
 """Tests of the command line: input errors are reported before anything starts."""
 
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from ed2k_client.cli import USAGE_ERROR, main
 from ed2k_client.client import DEFAULT_STATE_DIR
+from ed2k_client.servermet import ServerList
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from unittest.mock import MagicMock
 
     from pyfakefs.fake_filesystem import FakeFilesystem
 
@@ -20,6 +23,7 @@ HASH = 'hash'
 NO_SUCH_PATH = 'error: no such file or directory: '
 MISSING_NAME = 'missing.dat'
 GOOD_LINK = 'ed2k://|file|a.pdf|5|E737E3459E12C22118C48306FAE1D8EB|/'
+SAVED_LIST = '/lists/server.met'
 DOWNLOAD = 'download'
 SHARE = 'share'
 
@@ -135,6 +139,18 @@ class TestMain:
 
         assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'error: not a file: {SHELF}\n')
 
+    @patch.object(ServerList, DOWNLOAD, return_value=ServerList(servers=()))
+    def test_servers_save_hands_the_file_to_the_download(self, download: MagicMock) -> None:
+        """The servers command with --save asks the download to save the list it fetches to that file.
+
+        :param download: the mocked download, which returns an empty list.
+        :type download: MagicMock
+        """
+        code = main(['servers', '--save', SAVED_LIST])
+
+        assert code == 0
+        assert str(download.call_args.kwargs['save_to']) == SAVED_LIST
+
 
 @pytest.mark.integration
 class TestMainPathSettings:
@@ -144,17 +160,22 @@ class TestMainPathSettings:
     turns a string into a path only for a ``Path`` class, refuses every path setting on the in-memory file system.
     """
 
-    def test_missing_nodes_dat_flag_is_a_usage_error(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """A nodes.dat flag naming a missing file is reported in one line instead of failing once Kad starts.
+    @pytest.mark.parametrize('flag', ['--nodes-dat', '--server-met'])
+    def test_missing_path_flag_is_a_usage_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str
+    ) -> None:
+        """A flag naming a missing nodes.dat or server.met is reported in one line instead of failing once it is read.
 
-        :param tmp_path: the directory that holds the state and lacks the nodes.dat.
+        :param tmp_path: the directory that holds the state and lacks the named file.
         :type tmp_path: Path
         :param capsys: the captured output.
         :type capsys: pytest.CaptureFixture[str]
+        :param flag: the flag that names the missing file.
+        :type flag: str
         """
         missing = tmp_path / MISSING_NAME
 
-        code = main([*SEARCH, '--nodes-dat', str(missing), '--no-server', '--state-dir', str(tmp_path)])
+        code = main([*SEARCH, flag, str(missing), *OFFLINE, '--state-dir', str(tmp_path)])
 
         assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'{NO_SUCH_PATH}{missing}\n')
 

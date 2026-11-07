@@ -67,7 +67,7 @@ class TestSearch:
             status = await client.connect()
             results = await client.search(KEYWORD)
 
-        assert status.client_id > 0
+        assert all(session.client_id > 0 for session in status.servers)
         assert len(results) >= 10
         assert all(result.name.lower().endswith(BOOK_EXTENSIONS) for result in results)
         assert all(result.size > 0 for result in results)

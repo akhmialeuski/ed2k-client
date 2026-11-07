@@ -28,7 +28,7 @@ from ed2k_client import Client, ClientConfig
 
 async def main() -> None:
     async with Client(ClientConfig()) as client:
-        await client.connect()  # log in to the busiest server of the eMule Security server.met
+        await client.connect()  # log in to the four busiest servers of the eMule Security server.met
         await client.connect_kad()  # bootstrap Kad from the eMule Security nodes.dat
         results = await client.search('kademlia')  # PDF and DjVu files, most sources first
         for result in results[:10]:
@@ -45,18 +45,25 @@ The main entry points:
 | Call                                                 | What it does                                                  |
 |------------------------------------------------------|---------------------------------------------------------------|
 | `Client(ClientConfig(...))`                          | Loads or creates the identity, takes the state directory lock |
-| `await client.connect(server=None)`                  | Logs in to a server and returns the assigned High or Low ID   |
+| `await client.connect(server=None)`                  | Logs in to up to four servers at once and returns their IDs   |
 | `await client.connect_kad()`                         | Bootstraps Kad and returns the number of live contacts        |
-| `await client.search('words')`                       | Searches PDF and DjVu files on the server and in Kad          |
+| `await client.search('words')`                       | Searches PDF and DjVu files on every server and in Kad        |
 | `await client.search(SearchQuery(...))`              | Searches with explicit extensions, file type and size limits  |
-| `await client.find_sources(file_hash=..., size=...)` | Asks the server and Kad which peers hold a file               |
+| `await client.find_sources(file_hash=..., size=...)` | Asks every server and Kad which peers hold a file             |
 | `await client.download(result_or_link)`              | Downloads, verifies, inspects and releases one file           |
-| `await client.share(path)`                           | Shares a file or a directory and publishes it on the server   |
-| `client.status`                                      | Server, ID, Kad contacts and shared files                     |
+| `await client.share(path)`                           | Shares a file or a directory and publishes it on every server |
+| `client.status`                                      | Server sessions with their IDs, Kad contacts, shared files    |
 | `hash_file(path)`, `FileLink.parse(text)`            | Compute an eD2k hash, parse or build `ed2k://` links          |
 
 Several downloads run concurrently with `asyncio.gather` on one client. One state directory serves one client at a
 time, because a server keeps a single session per user hash.
+
+`connect()` logs in to `server_sessions` servers at once, four by default, because each server indexes its own users'
+files: on 2026-11-07 seven servers answered one search with 1,808 distinct files, 1,575 of them known to one server
+only. The candidates come from the configured `servers`, a local `server_met` file or the downloaded list, which is
+cached as `server.met` in the state directory and read from there when the download fails. Servers that accepted a
+login are kept in `servers.json` in the state directory and tried first next time, and one that refuses is dropped.
+Peers learn the first live server from the hello, and shared files are published on every live server.
 
 ## Settings
 
@@ -65,7 +72,7 @@ values the PoC was tested with as defaults:
 
 | Group          | Holds                                                                              |
 |----------------|------------------------------------------------------------------------------------|
-| `ClientConfig` | Directories, ports, nickname, server list and `nodes.dat` sources, IP filter       |
+| `ClientConfig` | Directories, ports, nickname, server lists and sessions, `nodes.dat`, IP filter    |
 | `download`     | Peers at once, queue wait, reask interval, source refresh, deadline, content check |
 | `timeouts`     | Connect, read, server login, search and sources, bootstrap download                |
 | `limits`       | Caps on packet sizes, tags, strings, results, sources and bootstrap files          |
@@ -96,14 +103,16 @@ uv run ed2k-client search "springer 2025" --json
 uv run ed2k-client download "ed2k://|file|Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|/" --deadline-hours 24
 uv run ed2k-client --config config.example.toml share ~/books --seconds 3600 --upload-slots 4
 uv run ed2k-client hash book.pdf
-uv run ed2k-client servers
+uv run ed2k-client servers --save ~/server.met
+uv run ed2k-client --config config.example.toml search "springer 2025" --server-met ~/server.met
 ```
 
 `scripts/ed2k.py` runs the same command line from a checkout with `uv run scripts/ed2k.py ...`. `--config` reads a
 TOML file shaped like [config.example.toml](config.example.toml), and a flag wins over the file. `--server
-ed2k://|server|ip|port|/` picks a server, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use
-any free port, `--port 0` takes any free TCP port before the login and announces the port it got, and
-`--connect-timeout` and `--read-timeout` set the connection timeouts. `download` accepts several
+ed2k://|server|ip|port|/` picks a single server, `--server-met` reads the server list from a file that `servers
+--save` wrote, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use any free port, `--port 0`
+takes any free TCP port before the login and announces the port it got, and `--connect-timeout` and `--read-timeout`
+set the connection timeouts. `download` accepts several
 links and fetches them concurrently with one identity, `--safe-content` and `--any-content` widen what leaves
 quarantine, `--deadline-hours` and `--max-peers` bound each download, and
 `share` takes `--upload-slots`.
