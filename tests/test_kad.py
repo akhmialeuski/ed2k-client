@@ -17,7 +17,7 @@ from ed2k_client.constants import MAX_FILE_SIZE, KadOp, Protocol
 from ed2k_client.hashing import md4
 from ed2k_client.kad.contacts import KadId
 from ed2k_client.kad.node import BOOTSTRAP_REQUEST
-from ed2k_client.search import SearchOrigin
+from ed2k_client.search import SearchOrigin, SearchQuery
 from ed2k_client.sources import SourceOrigin
 from ed2k_client.tags import Tag, write_tags
 from ed2k_client.wire import Writer, encode_udp
@@ -103,7 +103,7 @@ class TestSearch:
             responsible = network.nodes[-1]
             async with Client(kad_config(tmp_path, LEECHER, network)) as client:
                 await client.connect_kad()
-                results = await client.search(KEYWORD)
+                results = await client.search(SearchQuery(text=KEYWORD, extensions=('pdf',)))
 
         assert [(result.name, result.size, result.origin) for result in results] == [
             (BOOK, 5_000_000, SearchOrigin.KAD)

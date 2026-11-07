@@ -85,8 +85,8 @@ def _apply_command_flags(config: ClientConfig, arguments: argparse.Namespace) ->
     download = config.download
     if getattr(arguments, 'any_content', False):
         download = replace(download, content_policy=ContentPolicy.ANY)
-    if getattr(arguments, 'safe_content', False):
-        download = replace(download, content_policy=ContentPolicy.SAFE)
+    if getattr(arguments, 'documents_only', False):
+        download = replace(download, content_policy=ContentPolicy.DOCUMENTS)
     if (hours := getattr(arguments, 'deadline_hours', None)) is not None:
         download = replace(download, deadline=hours * SECONDS_PER_HOUR)
     if (peers := getattr(arguments, 'max_peers', None)) is not None:
@@ -287,7 +287,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = commands.add_parser('search', parents=[network], help='search by words and extension')
     search.add_argument(TEXT_ARGUMENT)
-    search.add_argument('--ext', nargs='*', default=['pdf', 'djvu'], help='extensions, empty for any')
+    search.add_argument(
+        '--ext', nargs='*', default=[], help='accepted extensions, such as pdf djvu epub, any when absent'
+    )
     search.add_argument('--documents', action=FLAG, help='restrict to the server type Doc')
     search.add_argument('--json', action=FLAG)
     search.set_defaults(handler=_search)
@@ -295,7 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     download = commands.add_parser('download', parents=[network], help='download ed2k:// file links concurrently')
     download.add_argument(LINKS_ARGUMENT, nargs='+', metavar='link')
     content = download.add_mutually_exclusive_group()
-    content.add_argument('--safe-content', action=FLAG, help='release any file except programs, scripts and macros')
+    content.add_argument('--documents-only', action=FLAG, help='release only PDF and DjVu files without active content')
     content.add_argument('--any-content', action=FLAG, help='release every file, programs included')
     download.add_argument('--deadline-hours', type=float, help='give up after this many hours')
     download.add_argument('--max-peers', type=int, help='sources downloaded from at the same time')

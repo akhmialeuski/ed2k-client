@@ -72,7 +72,6 @@ SERVER_MET_CACHE: str = 'server.met'
 DEFAULT_NICKNAME: str = 'ed2k-client'
 SERVERS_KEY: str = 'servers'
 DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({'pdf', 'djvu', 'djv'})
-BOOK_EXTENSIONS: tuple[str, ...] = ('pdf', 'djvu')
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,8 +469,8 @@ class Client:
     async def search(self, query: SearchQuery | str, *, max_results: int = 200) -> list[SearchResult]:
         """Search every live server session and Kad, merge the answers by hash and rank them by sources.
 
-        A plain string searches for books: its words in PDF or DjVu files. A :class:`SearchQuery` sets the
-        extensions, the file type and the size limits explicitly.
+        A plain string searches its words in files of every type. A :class:`SearchQuery` sets the extensions, the
+        file type and the size limits explicitly.
 
         :param query: the words, or a full query.
         :type query: SearchQuery | str
@@ -485,7 +484,7 @@ class Client:
             err_msg = 'connect to a server or to Kad before searching'
             raise NotConnectedError(err_msg)
         if isinstance(query, str):
-            query = SearchQuery(text=query, extensions=BOOK_EXTENSIONS)
+            query = SearchQuery(text=query)
 
         # Every server and Kad are asked at once, and one that fails costs only its own results
         merged = SearchResults()

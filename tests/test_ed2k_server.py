@@ -45,6 +45,8 @@ KEYWORD = 'kademlia'
 BOOK = 'Kademlia Explained.pdf'
 ATLAS = 'Kademlia Atlas.djvu'
 LEAFLET = 'Small Kademlia Leaflet.pdf'
+NOTES = 'kademlia notes.txt'
+BOOK_TYPES = ('pdf', 'djvu')
 SHELF_SIZE = 4
 WAIT_LIMIT = 10.0
 FIRST_BOOK = 'Kademlia First Steps.pdf'
@@ -63,7 +65,7 @@ def library(root: Path) -> Path:
     """
     write_file(root / LIBRARY / BOOK, incompressible(PART_SIZE + 4321))
     write_file(root / LIBRARY / ATLAS, compressible(600_000, header=DJVU_HEADER))
-    write_file(root / LIBRARY / 'kademlia notes.txt', b'plain text')
+    write_file(root / LIBRARY / NOTES, b'plain text')
     write_file(root / LIBRARY / LEAFLET, compressible(2_000))
     return root / LIBRARY
 
@@ -312,7 +314,7 @@ class TestSearch:
     """Tests of :meth:`Client.search` through a server."""
 
     async def test_search_filters_by_extension_and_size(self, tmp_path: Path) -> None:
-        """A book search finds the PDFs and the DjVu, skips the text file, and a size floor drops the leaflet.
+        """Plain words find files of every type, given extensions skip the text file, and a size floor drops the leaflet.
 
         :param tmp_path: the directory the clients keep their files in.
         :type tmp_path: Path
@@ -323,13 +325,15 @@ class TestSearch:
             await publishing_seeder(stack, tmp_path, server, shelf)
             leecher = await connected_leecher(stack, tmp_path, server)
 
-            books = await leecher.search(KEYWORD)
-            large = await leecher.search(SearchQuery(text=KEYWORD, extensions=('pdf', 'djvu'), min_size=10_000))
+            everything = await leecher.search(KEYWORD)
+            books = await leecher.search(SearchQuery(text=KEYWORD, extensions=BOOK_TYPES))
+            large = await leecher.search(SearchQuery(text=KEYWORD, extensions=BOOK_TYPES, min_size=10_000))
 
+        assert sorted(result.name for result in everything) == sorted([BOOK, ATLAS, NOTES, LEAFLET])
         assert sorted(result.name for result in books) == sorted([BOOK, ATLAS, LEAFLET])
         assert sorted(result.name for result in large) == sorted([BOOK, ATLAS])
         assert all(result.sources == 1 for result in books)
-        assert server.searches == 2
+        assert server.searches == 3
 
     async def test_every_server_is_searched_and_asked_for_sources(self, tmp_path: Path) -> None:
         """A book known to one server and a book known to another are both found, each with its own source.

@@ -55,9 +55,9 @@ FINAL_FILE_MODE: int = 0o600
 class ContentPolicy(StrEnum):
     """Which finished files may leave quarantine.
 
-    ``DOCUMENTS`` releases PDF and DjVu files without active content. ``SAFE`` releases files of any kind except
-    programs, scripts, documents that may carry macros and PDF files with active content. ``ANY`` releases every
-    file and only records what the inspection found.
+    ``SAFE``, the default, releases files of any kind except programs, scripts, documents that may carry macros and
+    PDF files with active content. ``DOCUMENTS`` releases only PDF and DjVu files without active content. ``ANY``
+    releases every file and only records what the inspection found.
     """
 
     DOCUMENTS = 'documents'
@@ -86,7 +86,7 @@ class DownloadSettings:
     reask_interval: float = 1300.0
     source_refresh: float = 900.0
     deadline: float = 6 * SECONDS_PER_HOUR
-    content_policy: ContentPolicy = ContentPolicy.DOCUMENTS
+    content_policy: ContentPolicy = ContentPolicy.SAFE
     poll_interval: float = 1.0
     max_connect_failures: int = 3
 

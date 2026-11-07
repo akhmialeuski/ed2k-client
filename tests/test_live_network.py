@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ed2k_client import Client, ServerEntry, ServerList
+from ed2k_client import Client, SearchQuery, ServerEntry, ServerList
 from ed2k_client.client import ClientConfig
 from ed2k_client.constants import LOW_ID_LIMIT
 from ed2k_client.download import DownloadSettings
@@ -24,6 +24,7 @@ pytestmark = pytest.mark.network
 SEARCHING_SERVER = ServerEntry(host='85.17.116.222', port=6082, name='ed2k-rust')
 KEYWORD = 'springer'
 BOOK_EXTENSIONS = ('.pdf', '.djvu')
+BOOK_QUERY = SearchQuery(text=KEYWORD, extensions=BOOK_EXTENSIONS)
 
 
 def live_config(root: Path) -> ClientConfig:
@@ -65,7 +66,7 @@ class TestSearch:
         """
         async with Client(live_config(tmp_path)) as client:
             status = await client.connect()
-            results = await client.search(KEYWORD)
+            results = await client.search(BOOK_QUERY)
 
         assert all(session.client_id > 0 for session in status.servers)
         assert len(results) >= 10
@@ -80,7 +81,7 @@ class TestSearch:
         """
         async with Client(live_config(tmp_path)) as client:
             contacts = await client.connect_kad()
-            results = await client.search(KEYWORD)
+            results = await client.search(BOOK_QUERY)
 
         assert contacts >= 50
         assert results

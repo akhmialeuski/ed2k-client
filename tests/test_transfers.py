@@ -214,7 +214,7 @@ class TestDownload:
         assert result.path.read_bytes() == payload.read_bytes()
 
     async def test_djvu_and_non_document_content(self, tmp_path: Path) -> None:
-        """A DjVu is released as a document, a binary file only under the ANY content policy.
+        """Under the DOCUMENTS policy a DjVu is released and a binary file is not, which the ANY policy releases.
 
         :param tmp_path: the directory the clients keep their files in.
         :type tmp_path: Path
@@ -224,7 +224,7 @@ class TestDownload:
         async with AsyncExitStack() as stack:
             seeder = await stack.enter_async_context(Client(make_config(tmp_path, SEEDER)))
             await seeder.share(tmp_path / SOURCE_DIR)
-            leecher = await leech(stack, tmp_path, download=SHORT)
+            leecher = await leech(stack, tmp_path, download=replace(SHORT, content_policy=ContentPolicy.DOCUMENTS))
             result = await leecher.download(link_for(djvu), extra_sources=[source_of(seeder)])
             with pytest.raises(SecurityError, match='content is other'):
                 await leecher.download(link_for(binary), extra_sources=[source_of(seeder)])

@@ -6,8 +6,9 @@ many peers at once into a quarantine, verifies every part, inspects the content 
 It can also share files with other peers. The protocol details follow the C++ reference clients
 [aMule](https://github.com/amule-project/amule) and [eMule](https://github.com/irwir/eMule).
 
-The PoC was built to find and fetch books, so by default a search looks for PDF and DjVu files and a finished
-download leaves quarantine only when its content really is a safe PDF or DjVu document.
+A search looks for files of every type unless it names extensions, and a finished download leaves quarantine only
+when its content carries nothing that runs when it is opened. The PoC was built to fetch books, which a search
+for the extensions `pdf` and `djvu` and the `--documents-only` policy still serve.
 
 ## Installation
 
@@ -30,7 +31,7 @@ async def main() -> None:
     async with Client(ClientConfig()) as client:
         await client.connect()  # log in to the four busiest servers of the eMule Security server.met
         await client.connect_kad()  # bootstrap Kad from the eMule Security nodes.dat
-        results = await client.search('kademlia')  # PDF and DjVu files, most sources first
+        results = await client.search('kademlia')  # files of every type, most sources first
         for result in results[:10]:
             print(result.sources, result.size, result.name, result.link)
         finished = await client.download(results[0], progress=print)
@@ -47,7 +48,7 @@ The main entry points:
 | `Client(ClientConfig(...))`                          | Loads or creates the identity, takes the state directory lock |
 | `await client.connect(server=None)`                  | Logs in to up to four servers at once and returns their IDs   |
 | `await client.connect_kad()`                         | Bootstraps Kad and returns the number of live contacts        |
-| `await client.search('words')`                       | Searches PDF and DjVu files on every server and in Kad        |
+| `await client.search('words')`                       | Searches files of every type on every server and in Kad       |
 | `await client.search(SearchQuery(...))`              | Searches with explicit extensions, file type and size limits  |
 | `await client.find_sources(file_hash=..., size=...)` | Asks every server and Kad which peers hold a file             |
 | `await client.download(result_or_link)`              | Downloads, verifies, inspects and releases one file           |
@@ -100,6 +101,7 @@ description, and `scripts/render_config_example.py` regenerates it from the code
 
 ```bash
 uv run ed2k-client search "springer 2025" --json
+uv run ed2k-client search "springer 2025" --ext pdf djvu epub
 uv run ed2k-client download "ed2k://|file|Book.pdf|5648714|E737E3459E12C22118C48306FAE1D8EB|/" --deadline-hours 24
 uv run ed2k-client --config config.example.toml share ~/books --seconds 3600 --upload-slots 4
 uv run ed2k-client hash book.pdf
@@ -113,8 +115,8 @@ ed2k://|server|ip|port|/` picks a single server, `--server-met` reads the server
 --save` wrote, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use any free port, `--port 0`
 takes any free TCP port before the login and announces the port it got, and `--connect-timeout` and `--read-timeout`
 set the connection timeouts. `download` accepts several
-links and fetches them concurrently with one identity, `--safe-content` and `--any-content` widen what leaves
-quarantine, `--deadline-hours` and `--max-peers` bound each download, and
+links and fetches them concurrently with one identity, `--documents-only` narrows what leaves quarantine to PDF
+and DjVu and `--any-content` widens it to everything, `--deadline-hours` and `--max-peers` bound each download, and
 `share` takes `--upload-slots`.
 
 ## Design
@@ -152,8 +154,9 @@ Everything that arrives from the network is untrusted, and these are the defence
   directory, which defeats `../` and absolute-path tricks.
 - Downloaded data stays in quarantine until its eD2k hash and every part hash match, and a part that matched is never
   written again: a peer sending data for it is banned. The content is then classified by its magic bytes, and
-  `download.content_policy` decides what leaves quarantine. `documents`, the default, releases only PDF and DjVu. `safe`
-  (`--safe-content`) releases files of any kind except programs, scripts and Office documents that may carry macros.
+  `download.content_policy` decides what leaves quarantine. `safe`, the default, releases files of any kind except
+  programs, scripts and Office documents that may carry macros. `documents` (`--documents-only`) releases only PDF
+  and DjVu.
   `any` (`--any-content`) releases everything and only records the verdict. Under the first two, a PDF is refused when
   its dictionaries carry `/JavaScript`, `/JS`, `/Launch`, `/EmbeddedFile`, `/RichMedia`, `/XFA` or `/SubmitForm`
   (hex-escaped names included), outside its strings, comments and stream bodies. An object header inside a stream body
