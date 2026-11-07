@@ -11,7 +11,6 @@ from ed2k_client.errors import HashMismatchError, ProtocolError, SecurityError
 from ed2k_client.hashing import hash_file
 from ed2k_client.partfile import Block, PartFile, blocks_of_part
 from ed2k_client.security import (
-    SCAN_CHUNK,
     AddressPolicy,
     DocumentKind,
     IpFilter,
@@ -20,6 +19,7 @@ from ed2k_client.security import (
     resolve_inside,
     sanitize_filename,
 )
+from ed2k_client.settings import DEFAULT_IO
 
 if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -31,6 +31,7 @@ PDF_SUFFIX = '.pdf'
 PUBLIC_IP = '8.8.8.8'
 LOOPBACK = '127.0.0.1'
 PORT = 4662
+JS = 'JS'
 
 
 @pytest.mark.parametrize(
@@ -78,10 +79,15 @@ def test_address_policy_allows_only_global_unfiltered_addresses() -> None:
     ('content', 'kind', 'dangerous'),
     [
         (b'%PDF-1.7\n/Type /Catalog /OpenAction 3 0 R', DocumentKind.PDF, ()),
-        (b'%PDF-1.4\n<< /S /J#61vaScript /JS (x) >>', DocumentKind.PDF, ('JS', 'JavaScript')),
+        (b'%PDF-1.4\n<< /S /J#61vaScript /JS (x) >>', DocumentKind.PDF, (JS, 'JavaScript')),
         (b'%PDF-1.4\n/Launch /EmbeddedFile', DocumentKind.PDF, ('EmbeddedFile', 'Launch')),
         (b'%PDF-1.4\n1 0 obj << >> stream\n\x00/JS\x00 endstream /Type', DocumentKind.PDF, ()),
-        (b'%PDF-1.4\n<< /JS 2 0 R >> stream\nabc\nendstream', DocumentKind.PDF, ('JS',)),
+        (b'%PDF-1.4\n<< /JS 2 0 R >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
+        # The stream keyword hides nothing inside a string, a comment or after anything but a dictionary
+        (b'%PDF-1.4\n<< /T (x stream\n) /JS 1 0 R >>\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
+        (b'%PDF-1.4\n<< /T (a\\) (b) >> stream\n) /JS 1 0 R >>\n<< >> stream\nendstream', DocumentKind.PDF, (JS,)),
+        (b'%PDF-1.4\n%>> stream\n<< /JS 1 0 R >>\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
+        (b'%PDF-1.4\n/Xstream\n/JS 1 0 R\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
         (b'AT&TFORM\x00\x00\x00\x10DJVM', DocumentKind.DJVU, ()),
         (b'MZ\x90\x00', DocumentKind.OTHER, ('Windows executable',)),
         (b'PK\x03\x04', DocumentKind.OTHER, ('ZIP archive',)),
@@ -99,14 +105,24 @@ def test_inspect_document(fs: FakeFilesystem, content: bytes, kind: DocumentKind
 
 def test_pdf_scan_is_exact_across_read_chunks(fs: FakeFilesystem) -> None:
     """A stream body that crosses a read chunk hides its bytes, and a key cut by a chunk edge is still found."""
-    edge = SCAN_CHUNK - 4
+    edge = DEFAULT_IO.scan_chunk - 4
     head = b'%PDF-1.7\n1 0 obj << >> stream\n'
     body = head + b'\x00' * (edge - len(head)) + b'/JS\x00' * 8 + b'\nendstream\n'
-    trap = body + b'\x00' * (2 * SCAN_CHUNK - 4 - len(body)) + b'/JavaScript '
+    trap = body + b'\x00' * (2 * DEFAULT_IO.scan_chunk - 4 - len(body)) + b'/JavaScript '
     path = QUARANTINE / 'edge.pdf'
     fs.create_file(path, contents=trap)
 
     assert inspect_document(path).dangerous == ('JavaScript',)
+
+
+def test_pdf_string_spanning_read_chunks_keeps_its_stream_keyword_inert(fs: FakeFilesystem) -> None:
+    """A string opened in one read chunk still holds a fake stream start that arrives in the next one."""
+    head = b'%PDF-1.7\n<< /T ('
+    filler = b'a' * (DEFAULT_IO.scan_chunk - len(head))
+    path = QUARANTINE / 'long-title.pdf'
+    fs.create_file(path, contents=head + filler + b'>> stream\n) /JS 1 0 R >>\n<< >> stream\nabc\nendstream')
+
+    assert inspect_document(path).dangerous == (JS,)
 
 
 def test_check_document_refuses_wrong_kind(fs: FakeFilesystem) -> None:

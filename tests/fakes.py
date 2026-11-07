@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 LOOPBACK = '127.0.0.1'
+LOOPBACK_IP = int(ipaddress.IPv4Address(LOOPBACK))
 SERVER_FLAGS = ServerTcpFlag.COMPRESSION | ServerTcpFlag.NEWTAGS | ServerTcpFlag.UNICODE | ServerTcpFlag.LARGEFILES
 WELCOME = 'Welcome to the fake server'
 TOLERANCE = 1 << 120
@@ -329,6 +330,26 @@ class FakeKadNode(asyncio.DatagramProtocol):
             self.transport.sendto(encode_udp(protocol=Protocol.KAD, opcode=answer[0], payload=answer[1]), addr)
 
 
+class MalformingKadNode(FakeKadNode):
+    """A Kad node that answers every request with the right opcode and a body one byte or one entry short."""
+
+    def _answer(self, opcode: int, reader: Reader) -> tuple[int, bytes] | None:
+        """Answer a search with a count of one and no entry, and anything else with its last byte cut off.
+
+        :param opcode: the request opcode.
+        :type opcode: int
+        :param reader: the request body.
+        :type reader: Reader
+        :returns: the answer opcode and its truncated body, or ``None``.
+        :rtype: tuple[int, bytes] | None
+        """
+        if opcode in {KadOp.SEARCH_KEY_REQ, KadOp.SEARCH_SOURCE_REQ}:
+            target = KadId.read(reader)
+            return KadOp.SEARCH_RES, target.write(self.kad_id.write(Writer())).u16(1).getvalue()
+        answer = super()._answer(opcode, reader)
+        return None if answer is None else (answer[0], answer[1][:-1])
+
+
 class FakeKadNetwork:
     """A handful of Kad nodes on loopback, with a node inside the tolerance zone of every published target.
 
@@ -341,11 +362,21 @@ class FakeKadNetwork:
         self.nodes: list[FakeKadNode] = []
         self._ids = [KadId(self._random.getrandbits(128)) for _ in range(size)]
 
-    async def _add(self, kad_id: KadId) -> FakeKadNode:
-        node = FakeKadNode(kad_id=kad_id, network=self.nodes)
+    async def _add(self, kad_id: KadId, *, kind: type[FakeKadNode] = FakeKadNode) -> FakeKadNode:
+        node = kind(kad_id=kad_id, network=self.nodes)
         await asyncio.get_running_loop().create_datagram_endpoint(lambda: node, local_addr=(LOOPBACK, 0))
         self.nodes.append(node)
         return node
+
+    async def add_malforming_node(self, target: KadId) -> FakeKadNode:
+        """Add a node next to a target that answers every request malformed.
+
+        :param target: the target whose tolerance zone the node joins.
+        :type target: KadId
+        :returns: the node.
+        :rtype: FakeKadNode
+        """
+        return await self._add(KadId(target.value ^ 1), kind=MalformingKadNode)
 
     async def __aenter__(self) -> Self:
         """Open every node's socket."""
@@ -372,12 +403,14 @@ class FakeKadNetwork:
         for node in await self._responsible(target):
             node.keywords.setdefault(target, []).append((file_hash.digest, tags))
 
-    async def publish_source(self, file_hash: Ed2kHash, *, port: int, user_hash: bytes, source_type: int = 1) -> None:
-        """Index a loopback peer as a source of a file."""
+    async def publish_source(
+        self, file_hash: Ed2kHash, *, port: int, user_hash: bytes, source_type: int = 1, source_ip: int = LOOPBACK_IP
+    ) -> None:
+        """Index a peer as a source of a file, on loopback unless ``source_ip`` says otherwise."""
         target = KadId.from_digest(file_hash.digest)
         tags = [
             Tag(FileTag.SOURCE_TYPE, source_type),
-            Tag(FileTag.SOURCE_IP, int(ipaddress.IPv4Address(LOOPBACK))),
+            Tag(FileTag.SOURCE_IP, source_ip),
             Tag(FileTag.SOURCE_PORT, port),
             Tag(FileTag.SOURCE_UDP_PORT, 0),
         ]

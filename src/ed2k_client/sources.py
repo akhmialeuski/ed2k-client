@@ -44,11 +44,14 @@ class Source:
     @property
     def host(self) -> str:
         """The dotted address of a High ID source, whose ID is its address in network byte order."""
+        # The ID is the address bytes read as a little-endian number, so writing it little-endian gives them back
         return str(ipaddress.IPv4Address(self.client_id.to_bytes(4, ID_BYTE_ORDER)))
 
     @property
     def wants_obfuscation(self) -> bool:
         """Whether the connection should be obfuscated: the peer supports it and its user hash is known."""
+        # aMule obfuscates when the peer supports it and either side requests it, and this client always requests:
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L1611
         return bool(self.crypt & (CryptOption.SUPPORTED | CryptOption.REQUESTED | CryptOption.REQUIRED)) and (
             self.user_hash is not None
         )

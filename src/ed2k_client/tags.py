@@ -8,7 +8,7 @@ every value type aMule accepts. Writing always uses the old form with a length-p
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ed2k_client.constants import HASH_LENGTH, MAX_TAGS, TagType
+from ed2k_client.constants import HASH_LENGTH, TagType
 from ed2k_client.errors import ProtocolError
 from ed2k_client.wire import U8, U32, Reader, Writer, decode_text
 
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 type TagName = int | str
 type TagValue = int | str | bytes | float
 
+# A type byte with the high bit set is followed by a one-byte name id instead of a length-prefixed name:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Tag.cpp#L93
 NEW_FORM_BIT: int = 0x80
 UINT32_MAX: int = 0xFFFF_FFFF
 
@@ -34,6 +36,7 @@ class Tag:
     value: TagValue
 
 
+# Value readers by type, as CTag::CTag reads them: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Tag.cpp#L85
 VALUE_READERS: dict[int, Callable[[Reader], TagValue]] = {
     TagType.STRING: Reader.string,
     TagType.UINT8: Reader.u8,
@@ -43,6 +46,8 @@ VALUE_READERS: dict[int, Callable[[Reader], TagValue]] = {
     TagType.UINT64: Reader.u64,
     TagType.FLOAT32: Reader.f32,
     TagType.HASH16: Reader.hash16,
+    # aMule skips len / 8 + 1 bytes, one more than the bits need when len is a multiple of 8, and so must a reader
+    # that wants to stay aligned with what aMule writes: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Tag.cpp#L152
     TagType.BOOLARRAY: lambda reader: reader.take(reader.u16() // 8 + 1),
     TagType.BLOB: lambda reader: reader.take(reader.u32()),
     TagType.BSOB: lambda reader: reader.take(reader.u8()),
@@ -62,8 +67,11 @@ def _read_value(reader: Reader, tag_type: int) -> TagValue:
     """
     if (read := VALUE_READERS.get(tag_type)) is not None:
         return read(reader)
+
+    # STR1 to STR16 carry their length in the type byte itself and have no prefix
     if TagType.STR1 <= tag_type <= TagType.STR16:
         return decode_text(reader.take(tag_type - TagType.STR1 + 1))
+
     err_msg = f'unknown tag type 0x{tag_type:02X}'
     raise ProtocolError(err_msg)
 
@@ -83,8 +91,10 @@ def read_tag(reader: Reader) -> Tag:
         tag_type &= ~NEW_FORM_BIT
         name = reader.u8()
     else:
+        # The old form writes a numeric id as a one-byte name, so a single byte is an id and longer names are text
         raw_name = reader.take(reader.u16())
         name = raw_name[0] if len(raw_name) == 1 else decode_text(raw_name)
+
     return Tag(name=name, value=_read_value(reader, tag_type))
 
 
@@ -97,12 +107,13 @@ def read_tags(reader: Reader, *, count_size: int = 4) -> list[Tag]:
     :type count_size: int
     :returns: the tags in order.
     :rtype: list[Tag]
-    :raises ProtocolError: when the count exceeds :data:`MAX_TAGS`.
+    :raises ProtocolError: when the count exceeds the reader's ``tags`` limit.
     """
     count = reader.u8() if count_size == 1 else reader.u32()
-    if count > MAX_TAGS:
-        err_msg = f'{count} tags exceed the limit of {MAX_TAGS}'
+    if count > reader.limits.tags:
+        err_msg = f'{count} tags exceed the limit of {reader.limits.tags}'
         raise ProtocolError(err_msg)
+
     return [read_tag(reader) for _ in range(count)]
 
 
@@ -110,7 +121,7 @@ def write_tag(writer: Writer, tag: Tag) -> None:
     """Append one tag in the old form with a length-prefixed name.
 
     Integers take UINT32 when they fit and UINT64 otherwise, because some servers reject the 8- and 16-bit types in
-    login packets.
+    login packets. The format is that of ``CTag::WriteTagToFile``: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Tag.cpp#L394
 
     :param writer: the payload writer.
     :type writer: Writer
@@ -137,6 +148,7 @@ def write_tag(writer: Writer, tag: Tag) -> None:
         case bytes() as blob:
             tag_type = TagType.BLOB
             body.u32(len(blob)).raw(blob)
+
     name = bytes([tag.name]) if isinstance(tag.name, int) else tag.name.encode()
     writer.u8(tag_type).u16(len(name)).raw(name).raw(body.getvalue())
 
@@ -151,6 +163,7 @@ def write_tags(writer: Writer, tags: Iterable[Tag], *, count_size: int = 4) -> N
     :param count_size: width of the count, 4 bytes in eD2k and 1 byte in Kad.
     :type count_size: int
     """
+    # The count comes first, so a one-shot iterable is collected before anything is written
     materialised = list(tags)
     writer.raw((U8 if count_size == 1 else U32).pack(len(materialised)))
     for tag in materialised:

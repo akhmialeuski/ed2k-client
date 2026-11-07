@@ -2,6 +2,7 @@
 
 import struct
 import zlib
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,6 +16,9 @@ from ed2k_client.search import SearchQuery, encode_query, parse_server_results
 from ed2k_client.servermet import ServerList
 from ed2k_client.tags import Tag, read_tags, write_tags
 from ed2k_client.wire import U32, Reader, Writer, inflate, unpack_payload
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The tree a live eD2k server (ed2k-rust, 85.17.116.222:6082) answered with 300 results on 2026-11-06.
 LIVE_TREE_HEX = '0000010800737072696e6765720001020300706466010004020400646a7675010004'
@@ -124,6 +128,25 @@ def test_file_link_round_trip_and_rejections() -> None:
         with pytest.raises(ProtocolError):
             FileLink.parse(bad)
     assert str(ServerLink.parse(SERVER_LINK)) == SERVER_LINK
+
+
+@pytest.mark.parametrize(
+    'parse_link',
+    [
+        lambda: FileLink.parse('ed2k://|file|a.pdf|\u00b2|E737E3459E12C22118C48306FAE1D8EB|/'),
+        lambda: FileLink.parse('ed2k://|file|a.pdf|\u0661\u0662|E737E3459E12C22118C48306FAE1D8EB|/'),
+        lambda: ServerLink.parse('ed2k://|server|45.82.80.155|\u00b2|/'),
+    ],
+    ids=['superscript size', 'arabic-indic size', 'superscript port'],
+)
+def test_link_with_non_ascii_digits_is_refused(parse_link: Callable[[], object]) -> None:
+    """A size or port written in digits other than ASCII is a malformed link, refused like any other.
+
+    :param parse_link: parses one such link.
+    :type parse_link: Callable[[], object]
+    """
+    with pytest.raises(ProtocolError):
+        parse_link()
 
 
 def test_server_met_reads_address_in_network_order() -> None:

@@ -9,12 +9,18 @@ therefore defeats compression bombs.
 import ipaddress
 import struct
 import zlib
-from dataclasses import dataclass
-from typing import Literal, Self
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, Self
 
-from ed2k_client.constants import HASH_LENGTH, MAX_STRING_BYTES, MAX_UNPACKED_SIZE, Protocol
+from ed2k_client.constants import HASH_LENGTH, Protocol
 from ed2k_client.errors import ProtocolError
+from ed2k_client.settings import DEFAULT_LIMITS
 
+if TYPE_CHECKING:
+    from ed2k_client.settings import Limits
+
+# <protocol 1><length 4><opcode 1>, where the length counts the opcode and the payload:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Packet.cpp#L80
 HEADER = struct.Struct('<BIB')
 UDP_HEADER = struct.Struct('<BB')
 U8 = struct.Struct('<B')
@@ -41,16 +47,21 @@ class Reader:
     """Read typed values from a bytes buffer without ever passing its end.
 
     :ivar position: offset of the next byte to read.
+    :ivar limits: the caps applied to lengths read from the buffer.
     """
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, *, limits: Limits = DEFAULT_LIMITS) -> None:
         """Wrap a buffer.
 
         :param data: the bytes to read.
         :type data: bytes
+        :param limits: the caps applied to lengths read from the buffer.
+        :type limits: Limits
         """
+        # A memoryview slices without copying, so reading a large packet field by field stays linear
         self._data = memoryview(data)
         self.position = 0
+        self.limits = limits
 
     @property
     def remaining(self) -> int:
@@ -69,6 +80,7 @@ class Reader:
         if size < 0 or size > self.remaining:
             err_msg = f'need {size} bytes at offset {self.position}, have {self.remaining}'
             raise ProtocolError(err_msg)
+
         chunk = bytes(self._data[self.position : self.position + size])
         self.position += size
         return chunk
@@ -140,26 +152,29 @@ class Reader:
         return self.take(HASH_LENGTH)
 
     def ed2k_ip(self) -> str:
-        """Read an IPv4 address stored in network byte order, as eD2k does.
+        """Read an IPv4 address stored in network byte order, as eD2k does, while Kad stores it little-endian.
 
         :returns: the dotted address.
         :rtype: str
         """
         return str(ipaddress.IPv4Address(self.take(4)))
 
-    def string(self, *, length_size: int = 2, limit: int = MAX_STRING_BYTES) -> str:
+    def string(self, *, length_size: int = 2, limit: int | None = None) -> str:
         """Read a length-prefixed UTF-8 string.
 
         Invalid UTF-8 is replaced instead of rejected, because old clients still send Latin-1 file names.
 
         :param length_size: width of the length prefix, 1, 2 or 4 bytes.
         :type length_size: int
-        :param limit: largest accepted length in bytes.
-        :type limit: int
+        :param limit: largest accepted length in bytes, the reader's ``string_bytes`` limit when ``None``.
+        :type limit: int | None
         :returns: the decoded text.
         :rtype: str
         :raises ProtocolError: when the length exceeds the limit or the buffer.
         """
+        if limit is None:
+            limit = self.limits.string_bytes
+
         size = self.number(LENGTH_PREFIXES[length_size])
         if size > limit:
             err_msg = f'string of {size} bytes exceeds the limit of {limit}'
@@ -287,11 +302,13 @@ class Packet:
     :ivar protocol: the namespace byte, never ``PACKED`` or ``KAD_PACKED`` after decoding.
     :ivar opcode: the operation code.
     :ivar payload: the body after the opcode.
+    :ivar limits: the caps the packet's readers apply.
     """
 
     protocol: int
     opcode: int
     payload: bytes
+    limits: Limits = field(default=DEFAULT_LIMITS, compare=False, repr=False)
 
     def reader(self) -> Reader:
         """Open a reader over the payload.
@@ -299,10 +316,10 @@ class Packet:
         :returns: a reader positioned at the first payload byte.
         :rtype: Reader
         """
-        return Reader(self.payload)
+        return Reader(self.payload, limits=self.limits)
 
 
-def inflate(data: bytes, *, limit: int = MAX_UNPACKED_SIZE) -> bytes:
+def inflate(data: bytes, *, limit: int = DEFAULT_LIMITS.unpacked_size) -> bytes:
     """Decompress a zlib stream and refuse output larger than ``limit``.
 
     :param data: the compressed bytes.
@@ -313,12 +330,15 @@ def inflate(data: bytes, *, limit: int = MAX_UNPACKED_SIZE) -> bytes:
     :rtype: bytes
     :raises ProtocolError: when the stream is corrupt, truncated or inflates beyond the limit.
     """
+    # max_length stops the inflater at the limit and leaves the rest of the input in unconsumed_tail, so a bomb
+    # never reaches its full size in memory
     decompressor = zlib.decompressobj()
     try:
         output = decompressor.decompress(data, limit)
     except zlib.error as error:
         err_msg = f'corrupt zlib payload: {error}'
         raise ProtocolError(err_msg) from error
+
     if decompressor.unconsumed_tail:
         err_msg = f'zlib payload inflates beyond {limit} bytes'
         raise ProtocolError(err_msg)
@@ -343,7 +363,9 @@ def encode_tcp(*, protocol: int, opcode: int, payload: bytes = b'') -> bytes:
     return HEADER.pack(protocol, len(payload) + 1, opcode) + payload
 
 
-def unpack_payload(*, protocol: int, opcode: int, payload: bytes, packed_as: int = Protocol.EMULE) -> Packet:
+def unpack_payload(
+    *, protocol: int, opcode: int, payload: bytes, packed_as: int = Protocol.EMULE, limits: Limits = DEFAULT_LIMITS
+) -> Packet:
     """Turn a received body into a :class:`Packet`, inflating it when the protocol byte says it is packed.
 
     The namespace of an inflated packet depends on who sent it, exactly as in aMule: a server's packed packet is an
@@ -358,17 +380,23 @@ def unpack_payload(*, protocol: int, opcode: int, payload: bytes, packed_as: int
     :type payload: bytes
     :param packed_as: the namespace of a packed TCP packet from this sender.
     :type packed_as: int
+    :param limits: the caps on the inflated size and on the packet's readers.
+    :type limits: Limits
     :returns: the decoded packet.
     :rtype: Packet
     :raises ProtocolError: when the protocol byte is unknown.
     """
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/ServerSocket.cpp#L631
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Packet.cpp#L301
     match protocol:
         case Protocol.PACKED:
-            return Packet(protocol=packed_as, opcode=opcode, payload=inflate(payload))
+            body = inflate(payload, limit=limits.unpacked_size)
+            return Packet(protocol=packed_as, opcode=opcode, payload=body, limits=limits)
         case Protocol.KAD_PACKED:
-            return Packet(protocol=Protocol.KAD, opcode=opcode, payload=inflate(payload))
+            body = inflate(payload, limit=limits.unpacked_size)
+            return Packet(protocol=Protocol.KAD, opcode=opcode, payload=body, limits=limits)
         case Protocol.EDONKEY | Protocol.EMULE | Protocol.KAD:
-            return Packet(protocol=protocol, opcode=opcode, payload=payload)
+            return Packet(protocol=protocol, opcode=opcode, payload=payload, limits=limits)
         case _:
             err_msg = f'unknown protocol byte 0x{protocol:02X}'
             raise ProtocolError(err_msg)
@@ -389,11 +417,13 @@ def encode_udp(*, protocol: int, opcode: int, payload: bytes = b'') -> bytes:
     return UDP_HEADER.pack(protocol, opcode) + payload
 
 
-def decode_udp(datagram: bytes) -> Packet:
+def decode_udp(datagram: bytes, *, limits: Limits = DEFAULT_LIMITS) -> Packet:
     """Decode a UDP datagram into a :class:`Packet`.
 
     :param datagram: the received datagram.
     :type datagram: bytes
+    :param limits: the caps on the inflated size and on the packet's readers.
+    :type limits: Limits
     :returns: the decoded packet.
     :rtype: Packet
     :raises ProtocolError: when the datagram is too short or its protocol byte is unknown.
@@ -401,5 +431,6 @@ def decode_udp(datagram: bytes) -> Packet:
     if len(datagram) < UDP_HEADER.size:
         err_msg = f'datagram of {len(datagram)} bytes is too short'
         raise ProtocolError(err_msg)
+
     protocol, opcode = UDP_HEADER.unpack_from(datagram)
-    return unpack_payload(protocol=protocol, opcode=opcode, payload=datagram[UDP_HEADER.size :])
+    return unpack_payload(protocol=protocol, opcode=opcode, payload=datagram[UDP_HEADER.size :], limits=limits)

@@ -28,6 +28,7 @@ from ed2k_client.client import QUARANTINE_DIR
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
 from ed2k_client.partfile import PartState
 from ed2k_client.security import DocumentKind
+from ed2k_client.settings import ShareSettings
 from ed2k_client.sources import SourceOrigin, client_id_from_host
 from tests.helpers import (
     DJVU_HEADER,
@@ -227,7 +228,7 @@ async def test_upload_queue_serves_the_second_leecher_later(tmp_path: Path, capl
     caplog.set_level(logging.INFO)
     payload = source_file(tmp_path, BOOK, incompressible(PART_SIZE // 2))
     async with AsyncExitStack() as stack:
-        seeder, _ = await seed(stack, tmp_path, SEEDER, payload, upload_slots=1)
+        seeder, _ = await seed(stack, tmp_path, SEEDER, payload, share=ShareSettings(upload_slots=1))
         first = await stack.enter_async_context(Client(make_config(tmp_path, 'first')))
         second = await stack.enter_async_context(Client(make_config(tmp_path, 'second')))
         link = link_for(payload)

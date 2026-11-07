@@ -13,20 +13,24 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from ed2k_client.errors import ProtocolError
 from ed2k_client.fetch import fetch_https
+from ed2k_client.settings import DEFAULT_LIMITS, DEFAULT_TIMEOUTS
 from ed2k_client.wire import Reader
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ed2k_client.settings import Limits
     from ed2k_client.wire import Writer
 
 BYTE_ORDER: Literal['big'] = 'big'
 ID_BYTES: int = 16
+
+# Four little-endian words, most significant word first: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/SafeFile.cpp#L298
 WORDS = struct.Struct('<4I')
 BIG_ENDIAN_WORDS = struct.Struct('>4I')
 NODES_DAT_URL: str = 'https://upd.emule-security.org/nodes.dat'
-MAX_NODES_BYTES: int = 1024 * 1024
-MAX_CONTACTS: int = 20_000
+
+# <id 16><ip 4><udp port 2><tcp port 2><version 1>
 CONTACT_SIZE: int = 25
 UDP_KEY_SIZE: int = 8
 BOOTSTRAP_EDITION: int = 1
@@ -52,6 +56,7 @@ class KadId:
         :returns: the ID.
         :rtype: Self
         """
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/kademlia/utils/UInt128.cpp#L106
         return cls(int.from_bytes(digest, BYTE_ORDER))
 
     @classmethod
@@ -63,6 +68,7 @@ class KadId:
         :returns: the ID.
         :rtype: Self
         """
+        # Reading four little-endian words and packing them big-endian reverses each 4-byte group back
         return cls.from_digest(BIG_ENDIAN_WORDS.pack(*WORDS.unpack(reader.take(WORDS.size))))
 
     def write(self, writer: Writer) -> Writer:
@@ -118,6 +124,8 @@ class Contact:
         :rtype: Self
         """
         kad_id = KadId.read(reader)
+
+        # The address is a little-endian number, so IPv4Address gets the number rather than the bytes
         host = str(ipaddress.IPv4Address(reader.u32()))
         udp_port, tcp_port, version = reader.u16(), reader.u16(), reader.u8()
         return cls(kad_id=kad_id, host=host, udp_port=udp_port, tcp_port=tcp_port, version=version)
@@ -139,51 +147,68 @@ def read_contacts(reader: Reader, count: int) -> list[Contact]:
     :rtype: list[Contact]
     :raises ProtocolError: when the declared count does not fit.
     """
+    # Checked before any record is read, so a huge count costs nothing
     if count * CONTACT_SIZE > reader.remaining:
         err_msg = f'{count} contacts do not fit in a payload of {reader.remaining}'
         raise ProtocolError(err_msg)
     return [Contact.read(reader) for _ in range(count)]
 
 
-def parse_nodes_dat(data: bytes) -> list[Contact]:
+def parse_nodes_dat(data: bytes, *, limits: Limits = DEFAULT_LIMITS) -> list[Contact]:
     """Parse ``nodes.dat`` of version 1, 2 or 3 (the bootstrap edition) and drop Kad 1 nodes.
 
     :param data: the file content.
     :type data: bytes
+    :param limits: the cap on the number of contacts.
+    :type limits: Limits
     :returns: the contacts.
     :rtype: list[Contact]
     :raises ProtocolError: on an unknown version or an implausible count.
     """
-    reader = Reader(data)
+    # Since version 1 the file starts with a zero where version 0 had its count, as aMule reads it:
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/kademlia/routing/RoutingZone.cpp#L151
+    reader = Reader(data, limits=limits)
     if reader.u32() != 0:
         err_msg = 'nodes.dat of version 0 cannot tell Kad versions apart'
         raise ProtocolError(err_msg)
+
     version = reader.u32()
     if version not in SUPPORTED_VERSIONS:
         err_msg = f'unknown nodes.dat version {version}'
         raise ProtocolError(err_msg)
+
+    # Version 3 carries an edition word, and edition 1 is the bootstrap list without UDP keys
     bootstrap = version == max(SUPPORTED_VERSIONS) and reader.u32() == BOOTSTRAP_EDITION
     count = reader.u32()
-    if count > MAX_CONTACTS:
-        err_msg = f'{count} contacts exceed the limit of {MAX_CONTACTS}'
+    if count > limits.nodes_dat_contacts:
+        err_msg = f'{count} contacts exceed the limit of {limits.nodes_dat_contacts}'
         raise ProtocolError(err_msg)
+
+    # Every record of a regular file from version 2 on ends with an 8-byte UDP key and a verified flag
     contacts = []
     for _ in range(count):
         contacts.append(Contact.read(reader))
         if version >= MIN_KAD2_VERSION and not bootstrap:
             reader.take(UDP_KEY_SIZE + 1)
+
     return [contact for contact in contacts if contact.version >= MIN_KAD2_VERSION]
 
 
-def download_nodes_dat(url: str = NODES_DAT_URL) -> list[Contact]:
+def download_nodes_dat(
+    url: str = NODES_DAT_URL, *, limits: Limits = DEFAULT_LIMITS, timeout: float = DEFAULT_TIMEOUTS.bootstrap_fetch
+) -> list[Contact]:
     """Fetch and parse a ``nodes.dat`` over HTTPS.
 
     :param url: the HTTPS URL.
     :type url: str
+    :param limits: the caps on the download size and on the number of contacts.
+    :type limits: Limits
+    :param timeout: seconds the download may take.
+    :type timeout: float
     :returns: the contacts.
     :rtype: list[Contact]
     """
-    return parse_nodes_dat(fetch_https(url, limit=MAX_NODES_BYTES))
+    return parse_nodes_dat(fetch_https(url, limit=limits.nodes_dat_bytes, timeout=timeout), limits=limits)
 
 
 def closest(contacts: Iterable[Contact], target: KadId, *, count: int) -> list[Contact]:

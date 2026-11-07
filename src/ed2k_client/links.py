@@ -6,6 +6,7 @@ are ignored.
 """
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Self, override
 from urllib.parse import quote, unquote
@@ -19,6 +20,10 @@ FILE_FIELDS: int = 4
 SERVER_FIELDS: int = 3
 AICH_PREFIX: str = 'h='
 MAX_PORT: int = 65_535
+
+# Sizes and ports are written in ASCII digits. str.isdigit() also accepts other Unicode digits, some of which int()
+# refuses and some of which it reads, so neither kind is a well-formed link
+DECIMAL = re.compile(r'[0-9]+')
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,10 +55,13 @@ class FileLink:
         if len(fields) < FILE_FIELDS or fields[0] != 'file':
             err_msg = f'not an ed2k file link: {link!r}'
             raise ProtocolError(err_msg)
+
+        # The name stays untrusted here and is sanitised only where it becomes a file name
         name, size_text, hash_text = unquote(fields[1]), fields[2], fields[3]
-        if not size_text.isdigit() or not 0 < int(size_text) <= MAX_FILE_SIZE:
+        if not DECIMAL.fullmatch(size_text) or not 0 < int(size_text) <= MAX_FILE_SIZE:
             err_msg = f'invalid size in link: {size_text!r}'
             raise ProtocolError(err_msg)
+
         aich = next((field.removeprefix(AICH_PREFIX) for field in fields[4:] if field.startswith(AICH_PREFIX)), None)
         return cls(name=name, size=int(size_text), file_hash=Ed2kHash.from_hex(hash_text), aich_root=aich)
 
@@ -64,6 +72,7 @@ class FileLink:
         :returns: the ``ed2k://`` text.
         :rtype: str
         """
+        # safe='' encodes the slash too, because a '|' or '/' in a name would end the field or the link
         aich = f'{AICH_PREFIX}{self.aich_root}|' if self.aich_root is not None else ''
         return f'{SCHEME}|file|{quote(self.name, safe="")}|{self.size}|{self.file_hash.hex}|{aich}/'
 
@@ -90,7 +99,7 @@ class ServerLink:
         :raises ProtocolError: when the text is not a well-formed server link.
         """
         fields = _fields(link)
-        if len(fields) < SERVER_FIELDS or fields[0] != 'server' or not fields[2].isdigit():
+        if len(fields) < SERVER_FIELDS or fields[0] != 'server' or not DECIMAL.fullmatch(fields[2]):
             err_msg = f'not an ed2k server link: {link!r}'
             raise ProtocolError(err_msg)
         try:
@@ -98,6 +107,7 @@ class ServerLink:
         except ValueError as error:
             err_msg = f'invalid server address: {fields[1]!r}'
             raise ProtocolError(err_msg) from error
+
         port = int(fields[2])
         if not 0 < port <= MAX_PORT:
             err_msg = f'invalid server port: {port}'
@@ -127,4 +137,6 @@ def _fields(link: str) -> list[str]:
     if not text.lower().startswith(SCHEME + '|') or not text.endswith('/'):
         err_msg = f'not an ed2k link: {link!r}'
         raise ProtocolError(err_msg)
+
+    # Empty fields come from the leading and trailing pipes and from the optional sections
     return [field for field in text[len(SCHEME) + 1 : -1].split('|') if field]

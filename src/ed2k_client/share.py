@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from ed2k_client.errors import SecurityError
 from ed2k_client.hashing import Ed2kHash, hash_file
+from ed2k_client.settings import DEFAULT_IO
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -66,17 +67,21 @@ class CachedHash:
 class SharedLibrary:
     """Files offered by hash, with a persistent hash cache."""
 
-    def __init__(self, *, state_dir: Path) -> None:
+    def __init__(self, *, state_dir: Path, read_chunk: int = DEFAULT_IO.read_chunk) -> None:
         """Load the hash cache.
 
         :param state_dir: the client's state directory.
         :type state_dir: Path
+        :param read_chunk: bytes read at a time while hashing.
+        :type read_chunk: int
         """
         self._cache_path = state_dir / CACHE_FILE
+        self._read_chunk = read_chunk
         self._cache: dict[str, CachedHash] = {}
         if self._cache_path.exists():
             raw = json.loads(self._cache_path.read_text(encoding=ENCODING))
             self._cache = {path: CachedHash(**record) for path, record in raw.items()}
+
         self._files: dict[Ed2kHash, SharedFile] = {}
 
     @property
@@ -106,6 +111,9 @@ class SharedLibrary:
         if path.is_symlink():
             err_msg = f'refusing to share the symbolic link {path}'
             raise SecurityError(err_msg)
+
+        # One level only, and links inside the directory are skipped too, so sharing a folder never reaches
+        # files outside it
         candidates: Iterable[Path] = sorted(path.iterdir()) if path.is_dir() else [path]
         added = [self._add_file(item.resolve()) for item in candidates if item.is_file() and not item.is_symlink()]
         self._save_cache()
@@ -119,11 +127,13 @@ class SharedLibrary:
         :returns: the shared file.
         :rtype: SharedFile
         """
+        # Size and modification time decide whether a cached hash is still valid, as aMule matches its known files:
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/KnownFileList.cpp#L75
         stat = path.stat()
         cached = self._cache.get(str(path))
         if cached is None or (cached.size, cached.mtime_ns) != (stat.st_size, stat.st_mtime_ns):
             logger.info('Hashing %s', path)
-            hashes = hash_file(path)
+            hashes = hash_file(path, read_chunk=self._read_chunk)
             cached = CachedHash(
                 size=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
@@ -131,6 +141,7 @@ class SharedLibrary:
                 part_hashes=[item.hex() for item in hashes.part_hashes],
             )
             self._cache[str(path)] = cached
+
         shared = SharedFile(
             path=path,
             name=path.name,
@@ -144,6 +155,7 @@ class SharedLibrary:
 
     def _save_cache(self) -> None:
         """Write the hash cache atomically with owner-only permissions."""
+        # Renamed over the old cache, so a crash never leaves a half-written file
         temporary = self._cache_path.with_suffix('.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
         with os.fdopen(descriptor, 'w', encoding=ENCODING) as stream:
@@ -166,11 +178,14 @@ class SharedLibrary:
         if not 0 <= start < end <= shared.size:
             err_msg = f'range {start}-{end} is invalid for {shared.size} bytes'
             raise SecurityError(err_msg)
+
+        # A changed file would be served under a hash it no longer has, so it is withdrawn instead
         stat = shared.path.stat()
         if (stat.st_size, stat.st_mtime_ns) != (shared.size, shared.mtime_ns):
             self._files.pop(shared.file_hash, None)
             err_msg = f'{shared.path} changed since it was hashed and is no longer shared'
             raise SecurityError(err_msg)
+
         with shared.path.open(READ_BINARY) as stream:
             stream.seek(start)
             return stream.read(end - start)

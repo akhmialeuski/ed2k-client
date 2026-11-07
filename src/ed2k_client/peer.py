@@ -20,6 +20,7 @@ from ed2k_client.constants import (
     LARGE_FILE_THRESHOLD,
     MAX_DATA_PACKET,
     MAX_HASHSET_PARTS,
+    MAX_REQUEST_RANGES,
     ClientTag,
     EmuleOp,
     PeerOp,
@@ -29,6 +30,7 @@ from ed2k_client.errors import ConnectionFailedError, ProtocolError, SecurityErr
 from ed2k_client.hashing import Ed2kHash, part_count
 from ed2k_client.partfile import Block
 from ed2k_client.server import emule_version_tag
+from ed2k_client.settings import DEFAULT_PEER
 from ed2k_client.tags import Tag, int_value, read_tags, str_value, tag_map, write_tags
 from ed2k_client.wire import Writer
 
@@ -36,23 +38,26 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Collection, Sequence
 
     from ed2k_client.identity import Identity
+    from ed2k_client.settings import PeerSettings
     from ed2k_client.share import SharedLibrary
     from ed2k_client.transport import PacketStream
     from ed2k_client.wire import Packet, Reader
 
 logger = logging.getLogger(__name__)
 
-MAX_RANGES: int = 3
-SEND_CHUNK: int = 10_240
-MAX_IGNORED_PACKETS: int = 32
+# OP_QUEUERANKING carries a 16-bit rank and ten reserved bytes: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadClient.cpp#L590
 QUEUE_RANK_PADDING: bytes = bytes(10)
 NO_SERVER: tuple[str, int] = ('0.0.0.0', 0)
-# Version 1 of data compression and Unicode support, shared files hidden; no UDP, AICH or source exchange.
+
+# The two option tags of the hello, laid out as aMule's SendHelloTypePacket packs them:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L1096
+# The first announces version 1 of data compression and Unicode support with shared files hidden, and no UDP, AICH
+# or source exchange. The second announces large files and support for obfuscation.
 MISC_OPTIONS_1: int = 1 << 28 | 1 << 20 | 1 << 2
 COMPRESSION_SHIFT: int = 20
 VERSION_MASK: int = 0xF
-# Large files and the support of obfuscation for incoming connections.
 MISC_OPTIONS_2: int = 1 << 4 | 1 << 7
+
 DATA_OPCODES: frozenset[tuple[int, int]] = frozenset(
     {
         (Protocol.EDONKEY, PeerOp.SENDINGPART),
@@ -155,11 +160,13 @@ class BlockInflater:
         :rtype: bytes
         :raises ProtocolError: when the stream is corrupt or inflates beyond the block size.
         """
+        # One byte more than the block can take is enough to tell an honest stream from one that overflows it
         try:
             output = self._decompressor.decompress(data, self._room - self.produced + 1)
         except zlib.error as error:
             err_msg = f'corrupt compressed block ({error})'
             raise ProtocolError(err_msg) from error
+
         self.produced += len(output)
         if self._decompressor.unconsumed_tail or self.produced > self._room:
             err_msg = 'compressed block inflates beyond its size'
@@ -177,6 +184,7 @@ def build_hello(local: LocalPeer, *, answer: bool) -> bytes:
     :returns: the payload.
     :rtype: bytes
     """
+    # [<16 1>]<user hash 16><id 4><port 2><tags><server ip 4><server port 2>: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L1020
     writer = Writer()
     if not answer:
         writer.u8(HASH_LENGTH)
@@ -191,6 +199,7 @@ def build_hello(local: LocalPeer, *, answer: bool) -> bytes:
             Tag(ClientTag.EMULE_MISCOPTIONS2, MISC_OPTIONS_2),
         ],
     )
+
     host, port = local.server or NO_SERVER
     return writer.ed2k_ip(host).u16(port).getvalue()
 
@@ -211,6 +220,8 @@ def parse_hello(reader: Reader, *, answer: bool) -> HelloInfo:
         raise ProtocolError(err_msg)
     user_hash, client_id, port = reader.hash16(), reader.u32(), reader.u16()
     tags = tag_map(read_tags(reader))
+
+    # The compression version sits in bits 20 to 23 of the first option tag: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L547
     compression_version = int_value(tags, ClientTag.EMULE_MISCOPTIONS1) >> COMPRESSION_SHIFT & VERSION_MASK
     return HelloInfo(
         user_hash=user_hash,
@@ -232,6 +243,7 @@ def parse_file_status(reader: Reader, *, size: int) -> FileStatus:
     :rtype: FileStatus
     :raises ProtocolError: when the part count does not fit the file.
     """
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/DownloadClient.cpp#L386
     count = reader.u16()
     total = part_count(size)
     if count == 0:
@@ -239,6 +251,8 @@ def parse_file_status(reader: Reader, *, size: int) -> FileStatus:
     if count != total:
         err_msg = f'file status with {count} parts for a file of {total}'
         raise ProtocolError(err_msg)
+
+    # One bit per part, least significant bit first within each byte
     bits = reader.take((count + 7) // 8)
     return FileStatus(parts=frozenset(index for index in range(count) if bits[index // 8] >> (index % 8) & 1))
 
@@ -255,13 +269,15 @@ def encode_part_request(*, file_hash: Ed2kHash, blocks: Sequence[Block], large: 
     :returns: protocol, opcode and payload.
     :rtype: tuple[int, int, bytes]
     """
-    padded = [*blocks, *[Block(0, 0)] * (MAX_RANGES - len(blocks))]
+    # <hash 16><three starts><three ends>, where all starts come before all ends and an empty range is 0 to 0
+    padded = [*blocks, *[Block(0, 0)] * (MAX_REQUEST_RANGES - len(blocks))]
     writer = Writer().raw(file_hash.digest)
     put = writer.u64 if large else writer.u32
     for block in padded:
         put(block.start)
     for block in padded:
         put(block.end)
+
     if large:
         return Protocol.EMULE, EmuleOp.REQUESTPARTS_I64, writer.getvalue()
     return Protocol.EDONKEY, PeerOp.REQUESTPARTS, writer.getvalue()
@@ -291,8 +307,8 @@ class PartRequest:
         """
         file_hash = Ed2kHash(reader.hash16())
         read = reader.u64 if large else reader.u32
-        starts = [read() for _ in range(MAX_RANGES)]
-        ends = [read() for _ in range(MAX_RANGES)]
+        starts = [read() for _ in range(MAX_REQUEST_RANGES)]
+        ends = [read() for _ in range(MAX_REQUEST_RANGES)]
         return cls(file_hash=file_hash, ranges=tuple((s, e) for s, e in zip(starts, ends, strict=True) if e > s))
 
 
@@ -303,17 +319,21 @@ class PeerConnection:
     :ivar remote: what the peer said in its hello, once known.
     """
 
-    def __init__(self, *, stream: PacketStream, local: LocalPeer) -> None:
+    def __init__(self, *, stream: PacketStream, local: LocalPeer, settings: PeerSettings = DEFAULT_PEER) -> None:
         """Wrap an open stream.
 
         :param stream: the connection.
         :type stream: PacketStream
         :param local: this client's description.
         :type local: LocalPeer
+        :param settings: how data is sent while serving.
+        :type settings: PeerSettings
         """
         self.stream = stream
         self._local = local
+        self._settings = settings
         self.remote: HelloInfo | None = None
+        self._holding_slot = False
 
     async def _next(self, wanted: Collection[tuple[int, int]]) -> Packet:
         """Read packets until one of the wanted kinds arrives.
@@ -324,7 +344,9 @@ class PeerConnection:
         :rtype: Packet
         :raises ProtocolError: when the peer floods unexpected packets.
         """
-        for _ in range(MAX_IGNORED_PACKETS):
+        # A peer may send packets this client has no use for, so a few unknown packets are normal and only a long
+        # run of them is a flood
+        for _ in range(self.stream.limits.ignored_packets):
             packet = await self.stream.read_packet(limit=MAX_DATA_PACKET)
             if (packet.protocol, packet.opcode) in wanted:
                 return packet
@@ -356,8 +378,11 @@ class PeerConnection:
         :rtype: FileStatus
         :raises ConnectionFailedError: when the peer does not have the file.
         """
+        # The name request comes first and the status request second, in the order aMule sends them:
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/DownloadClient.cpp#L232
         for opcode in (PeerOp.REQUESTFILENAME, PeerOp.SETREQFILEID):
             await self.stream.send(protocol=Protocol.EDONKEY, opcode=opcode, payload=file_hash.digest)
+
         wanted = {
             (Protocol.EDONKEY, PeerOp.FILESTATUS),
             (Protocol.EDONKEY, PeerOp.FILEREQANSNOFIL),
@@ -366,6 +391,8 @@ class PeerConnection:
         while True:
             packet = await self._next(wanted)
             reader = packet.reader()
+
+            # An answer about another file belongs to an earlier request on a reused connection
             if Ed2kHash(reader.hash16()) != file_hash:
                 continue
             if packet.opcode == PeerOp.FILEREQANSNOFIL:
@@ -386,6 +413,8 @@ class PeerConnection:
         await self.stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.HASHSETREQUEST, payload=file_hash.digest)
         reader = (await self._next({(Protocol.EDONKEY, PeerOp.HASHSETANSWER)})).reader()
         reader.hash16()
+
+        # The hashes are checked against the file hash by the caller, here only the count is bounded
         count = reader.u16()
         if count > MAX_HASHSET_PARTS:
             err_msg = f'hashset of {count} parts'
@@ -402,13 +431,16 @@ class PeerConnection:
         :raises QueuedError: when no slot arrives within the wait.
         """
         await self.stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.STARTUPLOADREQ, payload=file_hash.digest)
+
+        # eMule reports the rank as OP_QUEUERANKING with 16 bits, older clients as OP_QUEUERANK with 32:
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/ClientTCPSocket.cpp#L1367
         rank = 0
         wanted = {
             (Protocol.EDONKEY, PeerOp.ACCEPTUPLOADREQ),
             (Protocol.EMULE, EmuleOp.QUEUERANKING),
             (Protocol.EDONKEY, PeerOp.QUEUERANK),
         }
-        # The stream's idle timeout must be at least queue_wait, which the downloader arranges when it dials.
+        # The stream's idle timeout must be at least queue_wait, which the downloader arranges when it dials
         try:
             async with asyncio.timeout(queue_wait):
                 while (packet := await self._next(wanted)).opcode != PeerOp.ACCEPTUPLOADREQ:
@@ -438,19 +470,26 @@ class PeerConnection:
         await self.stream.send(protocol=protocol, opcode=opcode, payload=payload)
         remaining = {block: block.end - block.start for block in blocks}
         inflaters: dict[Block, BlockInflater] = {}
+
         while any(remaining.values()):
             packet = await self._next(DATA_OPCODES | SLOT_END_OPCODES)
             if (packet.protocol, packet.opcode) in SLOT_END_OPCODES:
                 err_msg = f'{self.stream.peer} ended the upload slot'
                 raise ConnectionFailedError(err_msg)
+
             reader = packet.reader()
             if Ed2kHash(reader.hash16()) != file_hash:
                 continue
+
+            # Every data packet names its own offset, so it is placed by that offset and never by arrival order
             start = reader.u64() if packet.opcode in WIDE_OPCODES else reader.u32()
             block = next((b for b in blocks if b.start <= start < b.end), None)
             if block is None:
                 err_msg = f'data at offset {start} from {self.stream.peer} lies outside the request'
                 raise ProtocolError(err_msg)
+
+            # A compressed block is one zlib stream split over packets that all repeat the block start, so the
+            # write offset is where the inflated output has reached: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/DownloadClient.cpp#L864
             if packet.opcode in COMPRESSED_OPCODES:
                 reader.u32()  # total compressed size of the block, not needed with a streaming inflater
                 inflater = inflaters.setdefault(block, BlockInflater(block))
@@ -462,6 +501,7 @@ class PeerConnection:
                 if end - start != len(data):
                     err_msg = f'{len(data)} data bytes from {self.stream.peer} do not span {start} to {end}'
                     raise ProtocolError(err_msg)
+
             if data:
                 remaining[block] = max(0, remaining[block] - len(data))
                 yield block, offset, data
@@ -474,18 +514,19 @@ class PeerConnection:
         :param slots: the upload slots shared by all connections.
         :type slots: asyncio.Semaphore
         """
-        holding_slot = False
+        # The slot is released in finally, so a peer that disconnects while holding one frees it for the next
         try:
             while True:
                 packet = await self.stream.read_packet()
-                holding_slot = await self._answer(packet, library=library, slots=slots, holding=holding_slot)
+                await self._answer(packet, library=library, slots=slots)
         except (ConnectionFailedError, ProtocolError, SecurityError) as error:
             logger.info('Serving %s ended: %s', self.stream.peer, error)
         finally:
-            if holding_slot:
+            if self._holding_slot:
                 slots.release()
+                self._holding_slot = False
 
-    async def _answer(self, packet: Packet, *, library: SharedLibrary, slots: asyncio.Semaphore, holding: bool) -> bool:
+    async def _answer(self, packet: Packet, *, library: SharedLibrary, slots: asyncio.Semaphore) -> None:
         """Answer one request of a downloading peer.
 
         :param packet: the request.
@@ -494,10 +535,6 @@ class PeerConnection:
         :type library: SharedLibrary
         :param slots: the upload slots.
         :type slots: asyncio.Semaphore
-        :param holding: whether this peer holds a slot.
-        :type holding: bool
-        :returns: whether the peer holds a slot afterwards.
-        :rtype: bool
         """
         reader = packet.reader()
         match (packet.protocol, packet.opcode):
@@ -508,22 +545,25 @@ class PeerConnection:
             case (Protocol.EDONKEY, PeerOp.REQUESTFILENAME | PeerOp.SETREQFILEID | PeerOp.HASHSETREQUEST):
                 await self._answer_file_query(packet.opcode, Ed2kHash(reader.hash16()), library=library)
             case (Protocol.EDONKEY, PeerOp.STARTUPLOADREQ):
-                if not holding:
+                # A peer that finds the slots taken learns it is queued and then waits on this connection. The slot
+                # is recorded as held the moment it is taken, so serve() gives it back whatever fails after that
+                if not self._holding_slot:
                     if slots.locked():
                         payload = Writer().u16(1).raw(QUEUE_RANK_PADDING).getvalue()
                         await self.stream.send(protocol=Protocol.EMULE, opcode=EmuleOp.QUEUERANKING, payload=payload)
                     await slots.acquire()
+                    self._holding_slot = True
                 await self.stream.send(protocol=Protocol.EDONKEY, opcode=PeerOp.ACCEPTUPLOADREQ)
-                return True
-            case (Protocol.EDONKEY, PeerOp.REQUESTPARTS) | (Protocol.EMULE, EmuleOp.REQUESTPARTS_I64) if holding:
+            case (Protocol.EDONKEY, PeerOp.REQUESTPARTS) | (Protocol.EMULE, EmuleOp.REQUESTPARTS_I64) if (
+                self._holding_slot
+            ):
                 large = packet.protocol == Protocol.EMULE
                 await self._send_parts(PartRequest.parse(reader, large=large), library=library, large=large)
-            case (Protocol.EDONKEY, PeerOp.CANCELTRANSFER | PeerOp.END_OF_DOWNLOAD) if holding:
+            case (Protocol.EDONKEY, PeerOp.CANCELTRANSFER | PeerOp.END_OF_DOWNLOAD) if self._holding_slot:
                 slots.release()
-                return False
+                self._holding_slot = False
             case _:
                 logger.debug('Not answering 0x%02X/0x%02X', packet.protocol, packet.opcode)
-        return holding
 
     async def _answer_file_query(self, opcode: int, file_hash: Ed2kHash, *, library: SharedLibrary) -> None:
         """Answer a file name, file status or hashset request.
@@ -537,6 +577,8 @@ class PeerConnection:
         """
         shared = library.get(file_hash)
         payload = Writer().raw(file_hash.digest)
+
+        # A complete file answers its status with a part count of 0, which means every part
         if shared is None:
             answer = PeerOp.FILEREQANSNOFIL
         elif opcode == PeerOp.REQUESTFILENAME:
@@ -548,6 +590,7 @@ class PeerConnection:
         else:
             answer = PeerOp.HASHSETANSWER
             payload.u16(len(shared.part_hashes)).raw(b''.join(shared.part_hashes))
+
         await self.stream.send(protocol=Protocol.EDONKEY, opcode=answer, payload=payload.getvalue())
 
     async def _send_parts(self, request: PartRequest, *, library: SharedLibrary, large: bool) -> None:
@@ -564,12 +607,17 @@ class PeerConnection:
         shared = library.get(request.file_hash)
         if shared is None:
             return
+
         wide = large or shared.size > LARGE_FILE_THRESHOLD
         for start, end in request.ranges:
-            if end - start > MAX_RANGES * BLOCK_SIZE:
+            # aMule refuses a range longer than three blocks the same way: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadDiskIOThread.cpp#L248
+            if end - start > MAX_REQUEST_RANGES * BLOCK_SIZE:
                 err_msg = f'{self.stream.peer} asked for {end - start} bytes in one range'
                 raise SecurityError(err_msg)
             data = library.read(shared=shared, start=start, end=end)
+
+            # Compressed only when the peer announced compression version 1 and the data actually shrinks, the two
+            # checks aMule makes: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadDiskIOThread.cpp#L385
             packed = zlib.compress(data) if self.remote is not None and self.remote.compression else data
             if len(packed) < len(data):
                 await self._send_compressed(request.file_hash, start=start, packed=packed, wide=wide)
@@ -588,16 +636,16 @@ class PeerConnection:
         :param wide: whether to use 64-bit offsets.
         :type wide: bool
         """
+        # aMule cuts a range into packets of at least 10 KiB: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadDiskIOThread.cpp#L468
         protocol, opcode = (Protocol.EMULE, EmuleOp.SENDINGPART_I64) if wide else (Protocol.EDONKEY, PeerOp.SENDINGPART)
-        for offset in range(0, len(data), SEND_CHUNK):
-            chunk = data[offset : offset + SEND_CHUNK]
+        for offset in range(0, len(data), self._settings.send_chunk):
+            chunk = data[offset : offset + self._settings.send_chunk]
             payload = Writer().raw(file_hash.digest)
             (payload.u64 if wide else payload.u32)(start + offset)
             (payload.u64 if wide else payload.u32)(start + offset + len(chunk))
             await self.stream.send(protocol=protocol, opcode=opcode, payload=payload.raw(chunk).getvalue())
 
     async def _send_compressed(self, file_hash: Ed2kHash, *, start: int, packed: bytes, wide: bool) -> None:
-        # As eMule does, every packet of one block repeats the block start and the total compressed size.
         """Send a zlib-compressed range as compressed data packets.
 
         :param file_hash: the file.
@@ -609,9 +657,11 @@ class PeerConnection:
         :param wide: whether to use 64-bit offsets.
         :type wide: bool
         """
+        # As eMule does, every packet of one block repeats the block start and the total compressed size
         opcode = EmuleOp.COMPRESSEDPART_I64 if wide else EmuleOp.COMPRESSEDPART
-        for offset in range(0, len(packed), SEND_CHUNK):
+        chunk = self._settings.send_chunk
+        for offset in range(0, len(packed), chunk):
             payload = Writer().raw(file_hash.digest)
             (payload.u64 if wide else payload.u32)(start)
-            payload.u32(len(packed)).raw(packed[offset : offset + SEND_CHUNK])
+            payload.u32(len(packed)).raw(packed[offset : offset + chunk])
             await self.stream.send(protocol=Protocol.EMULE, opcode=opcode, payload=payload.getvalue())

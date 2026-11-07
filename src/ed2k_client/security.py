@@ -6,7 +6,7 @@ The client trusts no byte it receives, and four kinds of input reach the disk or
   path the client writes is checked by :func:`resolve_inside` to stay inside its directory.
 * Addresses from servers, Kad and peers are dialled only after :class:`AddressPolicy` accepts them: a global
   unicast IPv4 address outside the IP filter, which keeps a hostile server from turning the client against the
-  local network (aMule drops LAN sources in ``CPartFile::AddSources`` for the same reason).
+  local network (aMule drops LAN sources in ``CPartFile::AddSources`` for the same reason, ``PartFile.cpp`` line 1816).
 * Downloaded content is inspected by :func:`inspect_document` before it leaves quarantine: the magic bytes must
   match the expected document type, executables and archives are refused, and a PDF is scanned for the active
   content keys that malicious PDFs rely on, following the approach of Didier Stevens' pdfid.
@@ -17,15 +17,17 @@ import ipaddress
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum, StrEnum, auto
 from typing import TYPE_CHECKING, Literal, Self
 
-from ed2k_client.constants import MAX_FILENAME_BYTES
 from ed2k_client.errors import SecurityError
+from ed2k_client.settings import DEFAULT_IO, DEFAULT_LIMITS
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from pathlib import Path
+
+    from ed2k_client.settings import IoSettings
 
 FALLBACK_NAME: str = 'download'
 READ_BINARY: Literal['rb'] = 'rb'
@@ -34,17 +36,39 @@ WINDOWS_RESERVED: frozenset[str] = frozenset(
 )
 UNSAFE_CHARACTERS = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]')
 IPFILTER_LINE = re.compile(r'^\s*([\d.]+)\s*-\s*([\d.]+)\s*,\s*(\d+)\s*,?(.*)$')
+
+# A range blocks when its level is below the filter level, and 127 is aMule's default level:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/IPFilter.cpp#L143
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/Preferences.cpp#L1220
 IPFILTER_BLOCK_BELOW: int = 127
-HEAD_WINDOW: int = 1024
 MAX_SUFFIX: int = 16
 PDF_MARKER: bytes = b'%PDF-'
 DJVU_MARKER: bytes = b'AT&TFORM'
+
+# A PDF name is a slash and regular characters, where #xx writes any byte in hex (ISO 32000-1, 7.3.5). The pattern
+# takes letters, digits and escapes only, which is all the keys of interest use:
+# https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf
 PDF_NAME = re.compile(rb'/([A-Za-z0-9#]+)')
 PDF_HEX_ESCAPE = re.compile(rb'#([0-9A-Fa-f]{2})')
-PDF_STREAM_START = re.compile(rb'(?<!end)stream\r?\n')
+
+# A stream body runs from the keyword stream after the >> of its dictionary to endstream (7.3.8). The keyword is a
+# token only outside a literal string, which nests parentheses and escapes with a backslash (7.3.4.2), and outside a
+# comment, which runs to the end of the line (7.2.4). Bytes that look like a stream start anywhere else keep the
+# scanner reading, so a hostile file can make the scan longer but never switch it off.
+PDF_WHITESPACE: bytes = rb'[\x00\t\n\x0c\r ]'
+PDF_STRING_START: bytes = b'('
+PDF_STRING_END: bytes = b')'
+PDF_COMMENT_START: bytes = b'%'
+PDF_OUTSIDE_TOKEN = re.compile(rb'[(%]|>>' + PDF_WHITESPACE + rb'*stream\r?\n')
+PDF_STRING_TOKEN = re.compile(rb'\\.|[()]', re.DOTALL)
+PDF_LINE_END = re.compile(rb'[\r\n]')
 PDF_STREAM_END: bytes = b'endstream'
-SCAN_CHUNK: int = 1024 * 1024
+
+# Longer than endstream, a stream start with a little whitespace and every key of interest, so a match across two
+# chunks is seen whole. A stream start padded beyond it is not recognised, which only makes the scan longer
 SCAN_OVERLAP: int = 64
+
+# The keys pdfid counts as signs of active content: https://blog.didierstevens.com/programs/pdf-tools/
 PDF_DANGEROUS_KEYS: frozenset[bytes] = frozenset(
     {b'JavaScript', b'JS', b'Launch', b'EmbeddedFile', b'EmbeddedFiles', b'RichMedia', b'XFA', b'SubmitForm'}
 )
@@ -89,27 +113,38 @@ class Inspection:
         return not self.dangerous
 
 
-def sanitize_filename(name: str, *, fallback: str = FALLBACK_NAME) -> str:
+def sanitize_filename(
+    name: str, *, fallback: str = FALLBACK_NAME, max_bytes: int = DEFAULT_LIMITS.filename_bytes
+) -> str:
     """Turn an untrusted file name into a single safe path component.
 
     Path separators, control and shell-special characters, leading dots and Windows device names are removed, the
-    text is normalised to NFC and cut to :data:`MAX_FILENAME_BYTES` bytes of UTF-8 while the extension is kept.
+    text is normalised to NFC and cut to ``max_bytes`` bytes of UTF-8 while the extension is kept.
 
     :param name: the name as received.
     :type name: str
     :param fallback: the name to use when nothing usable remains.
     :type fallback: str
+    :param max_bytes: the longest name in UTF-8 bytes, well below the 255 most file systems allow.
+    :type max_bytes: int
     :returns: a name that is safe to join to a directory.
     :rtype: str
     """
+    # NFC first, so that a name cannot pass the checks in one Unicode form and land on disk in another; a leading
+    # dot would hide the file
     cleaned = UNSAFE_CHARACTERS.sub('_', unicodedata.normalize('NFC', name)).strip().lstrip('.').strip()
     stem, dot, suffix = cleaned.rpartition('.')
     if not dot:
         stem, suffix = cleaned, ''
+
+    # CON, NUL and the like open a device on Windows whatever the extension
     if stem.upper() in WINDOWS_RESERVED:
         stem = f'_{stem}'
+
+    # The stem is cut at a byte budget and decoded with errors='ignore', so a multi-byte character cut in half
+    # disappears instead of leaving an invalid sequence
     suffix = suffix[:MAX_SUFFIX]
-    budget = MAX_FILENAME_BYTES - len(suffix.encode()) - 1
+    budget = max_bytes - len(suffix.encode()) - 1
     stem = stem.encode()[:budget].decode(errors='ignore').rstrip(' .')
     result = f'{stem}.{suffix}' if stem and suffix else stem or suffix
     return result or fallback
@@ -126,6 +161,7 @@ def resolve_inside(base: Path, name: str) -> Path:
     :rtype: Path
     :raises SecurityError: when the path would leave the directory.
     """
+    # resolve() follows symbolic links, so a link planted in the directory cannot lead the write elsewhere
     root = base.resolve()
     target = (root / name).resolve()
     if target.parent != root:
@@ -187,9 +223,11 @@ class IpFilter:
         """
         ranges: list[IpRange] = []
         for line in lines:
+            # Comments, blank lines and malformed lines are skipped as aMule skips them
             match = IPFILTER_LINE.match(line)
             if match is None or int(match.group(3)) >= IPFILTER_BLOCK_BELOW:
                 continue
+
             try:
                 first, last = (
                     int(ipaddress.IPv4Address('.'.join(str(int(octet)) for octet in text.split('.'))))
@@ -237,10 +275,15 @@ class AddressPolicy:
             ip = ipaddress.IPv4Address(address)
         except ValueError:
             return False
+
         if not 0 < port < 1 << 16 or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
             return False
+
+        # Loopback, private and link-local addresses would let a hostile server point the client at the local
+        # network, which only tests on one machine may allow
         if not ip.is_global and not self.allow_private:
             return False
+
         return not self.ip_filter.blocks(address)
 
 
@@ -255,69 +298,147 @@ def _decode_name(raw: bytes) -> bytes:
     return PDF_HEX_ESCAPE.sub(lambda escape: bytes([int(escape.group(1), 16)]), raw)
 
 
-def _scan_window(window: bytes, *, safe: int, inside: bool, found: set[bytes]) -> tuple[int, bool]:
-    """Collect the names outside stream bodies that start before ``safe``.
+class PdfLexMode(Enum):
+    """Where the PDF key scan stands in the token stream of the file."""
 
-    Matches that start before ``safe`` lie wholly inside the window, because the window keeps
-    :data:`SCAN_OVERLAP` bytes beyond it, more than ``endstream`` or any key of interest needs.
+    OUTSIDE = auto()
+    STRING = auto()
+    COMMENT = auto()
+    STREAM = auto()
 
-    :param window: the bytes being scanned.
-    :type window: bytes
-    :param safe: offset before which every match is complete.
-    :type safe: int
-    :param inside: whether the window starts inside a stream body.
-    :type inside: bool
-    :param found: the names collected so far, extended in place.
-    :type found: set[bytes]
-    :returns: the offset the next window resumes at and whether it starts inside a stream body.
-    :rtype: tuple[int, bool]
+
+# The token that moves the scan on in each mode other than STREAM, which looks for endstream
+MODE_TOKENS: dict[PdfLexMode, re.Pattern[bytes]] = {
+    PdfLexMode.OUTSIDE: PDF_OUTSIDE_TOKEN,
+    PdfLexMode.STRING: PDF_STRING_TOKEN,
+    PdfLexMode.COMMENT: PDF_LINE_END,
+}
+
+
+@dataclass(slots=True)
+class PdfKeyScan:
+    """Collect the names a PDF writes outside its stream bodies, one window of the file at a time.
+
+    Names count in strings and comments too, because a string or a comment matters only for telling a real stream
+    start from bytes that look like one.
+
+    :ivar found: the decoded names collected so far.
+    :ivar mode: where the previous window stopped.
+    :ivar depth: open parentheses of the literal string the previous window stopped in.
     """
-    position = 0
-    while position < safe:
-        if inside:
-            end = window.find(PDF_STREAM_END, position)
-            if end < 0 or end >= safe:
-                return safe, True
-            position, inside = end + len(PDF_STREAM_END), False
-            continue
-        start = PDF_STREAM_START.search(window, position)
-        boundary = start.start() if start is not None and start.start() < safe else safe
-        for match in PDF_NAME.finditer(window, position):
-            if match.start() >= boundary:
+
+    found: set[bytes] = field(default_factory=set)
+    mode: PdfLexMode = PdfLexMode.OUTSIDE
+    depth: int = 0
+
+    def scan(self, window: bytes, *, safe: int) -> int:
+        """Collect the names outside stream bodies that start before ``safe``.
+
+        Tokens and names that start before ``safe`` lie wholly inside the window, because the window keeps
+        :data:`SCAN_OVERLAP` bytes beyond it.
+
+        :param window: the bytes being scanned.
+        :type window: bytes
+        :param safe: offset before which every match is complete.
+        :type safe: int
+        :returns: the offset the next window resumes at.
+        :rtype: int
+        """
+        position = segment = 0
+        while position < safe:
+            # Inside a stream body nothing counts until endstream
+            if self.mode is PdfLexMode.STREAM:
+                end = window.find(PDF_STREAM_END, position)
+                if end < 0 or end >= safe:
+                    return safe
+                position = segment = end + len(PDF_STREAM_END)
+                self.mode = PdfLexMode.OUTSIDE
+                continue
+
+            token = MODE_TOKENS[self.mode].search(window, position)
+            if token is None or token.start() >= safe:
                 break
-            found.add(_decode_name(match.group(1)))
-        if start is None or boundary == safe:
-            return safe, False
-        position, inside = start.end(), True
-    return position, inside
+            position = token.end()
+            if self._step(token.group()):
+                self._collect(window, start=segment, limit=token.start())
+
+        if self.mode is not PdfLexMode.STREAM:
+            self._collect(window, start=segment, limit=safe)
+        return max(position, safe)
+
+    def _step(self, token: bytes) -> bool:
+        """Move to the mode a token leads to.
+
+        :param token: the token found in the current mode.
+        :type token: bytes
+        :returns: whether the token opened a stream body.
+        :rtype: bool
+        """
+        match self.mode:
+            case PdfLexMode.OUTSIDE if token == PDF_STRING_START:
+                self.mode, self.depth = PdfLexMode.STRING, 1
+            case PdfLexMode.OUTSIDE if token == PDF_COMMENT_START:
+                self.mode = PdfLexMode.COMMENT
+            case PdfLexMode.OUTSIDE:
+                self.mode = PdfLexMode.STREAM
+                return True
+            case PdfLexMode.STRING if token == PDF_STRING_START:
+                self.depth += 1
+            case PdfLexMode.STRING if token == PDF_STRING_END:
+                self.depth -= 1
+                self.mode = PdfLexMode.OUTSIDE if self.depth == 0 else PdfLexMode.STRING
+            case PdfLexMode.COMMENT:
+                self.mode = PdfLexMode.OUTSIDE
+            case _:
+                # A backslash escape inside a string changes nothing
+                pass
+        return False
+
+    def _collect(self, window: bytes, *, start: int, limit: int) -> None:
+        """Add the names that start between two offsets of the window.
+
+        :param window: the bytes being scanned.
+        :type window: bytes
+        :param start: the first offset.
+        :type start: int
+        :param limit: the offset at which names stop counting.
+        :type limit: int
+        """
+        for match in PDF_NAME.finditer(window, start):
+            if match.start() >= limit:
+                break
+            self.found.add(_decode_name(match.group(1)))
 
 
-def _pdf_keys(path: Path) -> set[bytes]:
-    # Names are read only outside stream bodies: compressed streams are random-looking bytes in which a short key
-    # such as /JS turns up by chance every few megabytes, while the dictionaries that make a PDF act sit outside
-    # them. The file is read in chunks, so a large book never sits in memory whole.
+def _pdf_keys(path: Path, *, chunk_size: int) -> set[bytes]:
     """Collect the PDF names written outside stream bodies.
 
     :param path: the file.
     :type path: Path
+    :param chunk_size: bytes read at a time.
+    :type chunk_size: int
     :returns: the decoded names.
     :rtype: set[bytes]
     """
-    found: set[bytes] = set()
-    inside = False
+    # Names are read only outside stream bodies: compressed streams are random-looking bytes in which a short key
+    # such as /JS turns up by chance about once in 22 MB, while the dictionaries that make a PDF act sit outside
+    # them. The file is read in chunks, so a large book never sits in memory whole
+    scan = PdfKeyScan()
     pending = b''
     with path.open(READ_BINARY) as stream:
         while True:
-            chunk = stream.read(SCAN_CHUNK)
+            chunk = stream.read(chunk_size)
             window = pending + chunk
+
+            # The last SCAN_OVERLAP bytes are scanned again with the next chunk, unless this was the end of the file
             safe = len(window) if not chunk else max(0, len(window) - SCAN_OVERLAP)
-            position, inside = _scan_window(window, safe=safe, inside=inside, found=found)
+            position = scan.scan(window, safe=safe)
             if not chunk:
-                return found
+                return scan.found
             pending = window[position:]
 
 
-def inspect_document(path: Path) -> Inspection:
+def inspect_document(path: Path, *, io: IoSettings = DEFAULT_IO) -> Inspection:
     """Classify a downloaded file by its content and look for dangerous parts.
 
     Names written with ``#xx`` escapes, a known trick to hide ``/JavaScript`` from naive scanners, are decoded
@@ -325,19 +446,26 @@ def inspect_document(path: Path) -> Inspection:
 
     :param path: the file.
     :type path: Path
+    :param io: how much of the file is read at a time.
+    :type io: IoSettings
     :returns: the verdict.
     :rtype: Inspection
     """
     with path.open(READ_BINARY) as stream:
-        head = stream.read(HEAD_WINDOW)
+        head = stream.read(io.head_window)
+
+    # The file type comes from the content, never from the name a peer chose
     for signature, label in MAGIC_SIGNATURES:
         if head.startswith(signature):
             return Inspection(kind=DocumentKind.OTHER, dangerous=(label,))
     if head.startswith(DJVU_MARKER):
         return Inspection(kind=DocumentKind.DJVU)
+
+    # Readers accept %PDF- anywhere in the first kilobyte, so a header behind junk is still a PDF to scan
     if PDF_MARKER not in head:
         return Inspection(kind=DocumentKind.OTHER)
-    keys = _pdf_keys(path)
+
+    keys = _pdf_keys(path, chunk_size=io.scan_chunk)
     return Inspection(
         kind=DocumentKind.PDF,
         dangerous=tuple(sorted(key.decode() for key in keys & PDF_DANGEROUS_KEYS)),
@@ -345,21 +473,24 @@ def inspect_document(path: Path) -> Inspection:
     )
 
 
-def check_document(path: Path, *, expected: Sequence[DocumentKind]) -> Inspection:
+def check_document(path: Path, *, expected: Sequence[DocumentKind], io: IoSettings = DEFAULT_IO) -> Inspection:
     """Inspect a file and refuse it unless it is a safe document of an expected kind.
 
     :param path: the file.
     :type path: Path
     :param expected: the acceptable kinds.
     :type expected: Sequence[DocumentKind]
+    :param io: how much of the file is read at a time.
+    :type io: IoSettings
     :returns: the verdict of a file that passed.
     :rtype: Inspection
     :raises SecurityError: when the content is of another kind or carries dangerous parts.
     """
-    verdict = inspect_document(path)
+    verdict = inspect_document(path, io=io)
     if verdict.kind not in expected:
         err_msg = f'{path.name}: content is {verdict.kind} {list(verdict.dangerous)}, expected {list(expected)}'
         raise SecurityError(err_msg)
+
     if not verdict.is_safe:
         err_msg = f'{path.name}: dangerous content {list(verdict.dangerous)}'
         raise SecurityError(err_msg)

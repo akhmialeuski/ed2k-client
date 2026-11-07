@@ -15,7 +15,7 @@ from ed2k_client.constants import PART_SIZE, PeerOp, Protocol
 from ed2k_client.identity import Identity
 from ed2k_client.partfile import blocks_of_part
 from ed2k_client.peer import LocalPeer, PeerConnection, build_hello, parse_hello
-from ed2k_client.server import ServerSession
+from ed2k_client.server import LoginDetails, ServerSession
 from ed2k_client.transport import PacketStream
 from tests.fakes import WELCOME, FakeServer
 from tests.helpers import (
@@ -178,9 +178,9 @@ async def test_low_id_seeder_serves_through_a_callback(tmp_path: Path) -> None:
         requester = await stack.enter_async_context(
             await ServerSession.login(
                 entry=server.entry,
-                identity=remote.identity,
-                tcp_port=listener.sockets[0].getsockname()[1],
-                nickname=REMOTE,
+                details=LoginDetails(
+                    identity=remote.identity, tcp_port=listener.sockets[0].getsockname()[1], nickname=REMOTE
+                ),
             )
         )
         await requester.request_callback(seeder.status.client_id)

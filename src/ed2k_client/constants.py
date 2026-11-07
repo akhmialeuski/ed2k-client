@@ -1,13 +1,14 @@
-"""Protocol constants of eD2k and Kad 2, taken from the aMule headers, and the safety limits of this client.
+"""Protocol constants of eD2k and Kad 2, taken from the aMule headers.
 
 The opcode values come from ``src/include/protocol`` and ``src/include/tags`` of aMule at commit
-6a1105634d81242a581a0f36a7e00379b12a83f3. The limits at the bottom are this client's own: every length that
-arrives from the network is checked against one of them before anything is allocated.
+6a1105634d81242a581a0f36a7e00379b12a83f3, and each group links to its header. Every value here is fixed by the
+protocol. The values this client chose, its timeouts and safety limits, live in :mod:`ed2k_client.settings`.
 """
 
 from enum import IntEnum, IntFlag
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/Protocols.h#L34
 class Protocol(IntEnum):
     """First byte of every packet, which selects the opcode namespace."""
 
@@ -18,6 +19,7 @@ class Protocol(IntEnum):
     KAD_PACKED = 0xE5
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Client2Server/TCP.h#L30
 class ServerOp(IntEnum):
     """Opcodes of the client to server TCP session."""
 
@@ -44,6 +46,7 @@ class ServerOp(IntEnum):
     FOUNDSOURCES_OBFU = 0x44
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Client2Client/TCP.h#L31
 class PeerOp(IntEnum):
     """Opcodes of the client to client TCP session in the original eDonkey namespace."""
 
@@ -69,6 +72,7 @@ class PeerOp(IntEnum):
     ASKSHAREDDENIEDANS = 0x61
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Client2Client/TCP.h#L62
 class EmuleOp(IntEnum):
     """Opcodes of the client to client TCP session in the eMule extension namespace."""
 
@@ -85,6 +89,7 @@ class EmuleOp(IntEnum):
     REQUESTPARTS_I64 = 0xA3
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/kad2/Client2Client/UDP.h#L34
 class KadOp(IntEnum):
     """Opcodes of Kad 2 over UDP."""
 
@@ -106,6 +111,7 @@ class KadOp(IntEnum):
     PONG = 0x61
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/tags/TagTypes.h#L30
 class TagType(IntEnum):
     """Value types of a tag; the short string types STR1 to STR16 follow ``STR1`` consecutively."""
 
@@ -124,6 +130,7 @@ class TagType(IntEnum):
     STR16 = 0x20
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/tags/FileTags.h#L30
 class FileTag(IntEnum):
     """Numeric tag names that describe a file."""
 
@@ -142,6 +149,7 @@ class FileTag(IntEnum):
     SOURCE_TYPE = 0xFF
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/tags/ClientTags.h#L30
 class ClientTag(IntEnum):
     """Numeric tag names of the login and hello packets."""
 
@@ -156,6 +164,7 @@ class ClientTag(IntEnum):
     EMULE_MISCOPTIONS2 = 0xFE
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/tags/ClientTags.h#L71
 class LoginFlag(IntFlag):
     """Capabilities a client announces to a server in the login tag ``SERVER_FLAGS``."""
 
@@ -170,6 +179,7 @@ class LoginFlag(IntFlag):
     REQUIRECRYPT = 0x0800
 
 
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Client2Server/TCP.h#L65
 class ServerTcpFlag(IntFlag):
     """Capabilities a server reports to a client after the assigned ID in ``IDCHANGE``."""
 
@@ -202,42 +212,45 @@ class SearchOperator(IntEnum):
     NOT_EQUAL = 5
 
 
-# File geometry
+# File geometry. A file is hashed in parts and transferred in blocks that never cross a part boundary.
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Constants.h#L77
 PART_SIZE: int = 9_728_000
 BLOCK_SIZE: int = 184_320
 MAX_FILE_SIZE: int = 0x40_0000_0000
+
+# Above 4 GiB the 32-bit offsets of the original packets overflow, and the _I64 opcodes and SIZE_HI tag take over
 LARGE_FILE_THRESHOLD: int = 0xFFFF_FFFF
+
+# The MD4 of no bytes, appended to the part hashes when a file is an exact multiple of PART_SIZE
 EMPTY_MD4: bytes = bytes.fromhex('31D6CFE0D16AE931B73C59D7E0C089C0')
 HASH_LENGTH: int = 16
 
 # Identity and versions announced to the network
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/common/ClientVersion.h#L42
 EDONKEY_VERSION: int = 0x3C
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/kad2/Constants.h#L29
 KADEMLIA_VERSION: int = 0x08
-SOFTWARE_ID: int = 0xFF  # SO_COMPAT_UNK: an eMule-compatible client without an assigned id
+# SO_COMPAT_UNK, an eMule-compatible client without an assigned id:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/ClientSoftware.h#L47
+SOFTWARE_ID: int = 0xFF
 SOFTWARE_VERSION: tuple[int, int, int] = (0, 1, 0)
+
+# Byte 5 = 14 and byte 14 = 111 mark the user hash of an eMule-family client, and aMule tells clients apart by them:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L1743
 USER_HASH_MARKERS: dict[int, int] = {5: 14, 14: 111}
+
+# An ID below 2^24 is a Low ID, a server-assigned number of a client that cannot accept connections:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/NetworkFunctions.h#L123
 LOW_ID_LIMIT: int = 0x0100_0000
 
 # Default ports
 DEFAULT_TCP_PORT: int = 4662
 DEFAULT_UDP_PORT: int = 4672
 
-# Safety limits applied to everything that arrives from the network
-MAX_CONTROL_PACKET: int = 512 * 1024
-MAX_DATA_PACKET: int = BLOCK_SIZE + 1024
-MAX_SERVER_PACKET: int = 4 * 1024 * 1024
-MAX_UNPACKED_SIZE: int = 8 * 1024 * 1024
-MAX_TAGS: int = 256
-MAX_STRING_BYTES: int = 64 * 1024
-MAX_SEARCH_RESULTS: int = 1000
-MAX_SOURCES_PER_FILE: int = 500
-MAX_HASHSET_PARTS: int = MAX_FILE_SIZE // PART_SIZE + 2
-MAX_FILENAME_BYTES: int = 200
-MAX_UDP_DATAGRAM: int = 8 * 1024
+# OP_REQUESTPARTS carries exactly three start and three end offsets:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Client2Client/TCP.h#L33
+MAX_REQUEST_RANGES: int = 3
 
-# Timeouts in seconds
-CONNECT_TIMEOUT: float = 15.0
-READ_TIMEOUT: float = 60.0
-SERVER_LOGIN_TIMEOUT: float = 45.0
-SEARCH_TIMEOUT: float = 30.0
-KAD_RESPONSE_TIMEOUT: float = 4.0
+# Limits the protocol itself sets: one block plus its header, and the parts of the largest file plus one spare
+MAX_DATA_PACKET: int = BLOCK_SIZE + 1024
+MAX_HASHSET_PARTS: int = MAX_FILE_SIZE // PART_SIZE + 2

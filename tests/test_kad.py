@@ -7,6 +7,7 @@ file, searches there, and downloads from a source it learned only from Kad.
 import asyncio
 import socket
 from contextlib import AsyncExitStack
+from operator import attrgetter
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,6 +16,7 @@ from ed2k_client import Client, Ed2kHash, hash_file
 from ed2k_client.constants import KadOp, Protocol
 from ed2k_client.hashing import md4
 from ed2k_client.kad.contacts import KadId
+from ed2k_client.kad.node import BOOTSTRAP_REQUEST
 from ed2k_client.search import SearchOrigin
 from ed2k_client.sources import SourceOrigin
 from ed2k_client.tags import Tag, write_tags
@@ -35,6 +37,7 @@ LEECHER = 'leecher'
 SEEDER = 'seeder'
 SOURCE_DIR = 'src'
 NODES_DAT = 'nodes.dat'
+OPCODE_OF = attrgetter('opcode')
 FORGED_NAME = 'forged.pdf'
 
 
@@ -78,6 +81,72 @@ async def test_source_search_keeps_only_reachable_sources(tmp_path: Path) -> Non
 
     assert sorted(source.port for source in sources) == [4662, 4663]
     assert {source.host for source in sources} == {LOOPBACK}
+
+
+async def test_concurrent_requests_to_one_node_each_get_their_answer(tmp_path: Path) -> None:
+    """Two requests in flight to the same node for the same kind of answer each receive one.
+
+    Concurrent downloads refresh their sources through Kad at the same time and reach the same close nodes.
+
+    :param tmp_path: the directory of the client's files.
+    :type tmp_path: Path
+    """
+    async with FakeKadNetwork() as network, Client(kad_config(tmp_path, LEECHER, network)) as client:
+        await client.connect_kad()
+        node = client._kad
+        assert node is not None
+        contact = next(iter(node.contacts.values()))
+        replies = await asyncio.gather(*(node._ask(contact, BOOTSTRAP_REQUEST, parse=OPCODE_OF) for _ in range(2)))
+
+    assert all(replies)
+
+
+async def test_malformed_bootstrap_answer_costs_only_its_seed(tmp_path: Path) -> None:
+    """A seed whose bootstrap answer is cut short is skipped, and the other seeds still lead to the whole network.
+
+    :param tmp_path: the directory of the client's files.
+    :type tmp_path: Path
+    """
+    async with FakeKadNetwork() as network:
+        await network.add_malforming_node(KadId.from_digest(md4(KEYWORD.encode())))
+        nodes_dat = network.write_nodes_dat(tmp_path / NODES_DAT, count=len(network.nodes))
+        async with Client(make_config(tmp_path, LEECHER, nodes_dat=nodes_dat)) as client:
+            contacts = await client.connect_kad()
+
+    assert contacts == len(network.nodes)
+
+
+async def test_malformed_answers_do_not_hide_the_honest_ones(tmp_path: Path) -> None:
+    """A node in the keyword's zone that answers lookups and searches malformed loses only its own answers.
+
+    :param tmp_path: the directory of the client's files.
+    :type tmp_path: Path
+    """
+    async with FakeKadNetwork() as network:
+        await network.publish_keyword(KEYWORD, file_hash=Ed2kHash(md4(b'a')), name=BOOK, size=5_000_000)
+        await network.add_malforming_node(KadId.from_digest(md4(KEYWORD.encode())))
+        async with Client(kad_config(tmp_path, LEECHER, network)) as client:
+            await client.connect_kad()
+            results = await client.search(KEYWORD)
+
+    assert [result.name for result in results] == [BOOK]
+
+
+async def test_source_with_an_address_beyond_32_bits_is_skipped(tmp_path: Path) -> None:
+    """A source entry whose address tag does not fit IPv4 is skipped, and the other entries of the answer are kept.
+
+    :param tmp_path: the directory of the client's files.
+    :type tmp_path: Path
+    """
+    file_hash = Ed2kHash(md4(b'book'))
+    async with FakeKadNetwork() as network:
+        await network.publish_source(file_hash, port=4662, user_hash=md4(b'open'))
+        await network.publish_source(file_hash, port=4663, user_hash=md4(b'wide'), source_ip=1 << 40)
+        async with Client(kad_config(tmp_path, LEECHER, network)) as client:
+            await client.connect_kad()
+            sources = await client.find_sources(file_hash=file_hash, size=1000)
+
+    assert [source.port for source in sources] == [4662]
 
 
 async def test_unsolicited_answers_are_dropped(tmp_path: Path) -> None:

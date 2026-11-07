@@ -17,6 +17,7 @@ from ed2k_client.links import FileLink, ServerLink
 from ed2k_client.search import FileType, SearchQuery, SearchResult
 from ed2k_client.security import DocumentKind, Inspection, inspect_document
 from ed2k_client.servermet import ServerEntry, ServerList
+from ed2k_client.settings import IoSettings, KadSettings, Limits, PeerSettings, ShareSettings, Timeouts
 from ed2k_client.sources import Source
 
 __all__ = [
@@ -37,7 +38,11 @@ __all__ = [
     'FileType',
     'HashMismatchError',
     'Inspection',
+    'IoSettings',
+    'KadSettings',
+    'Limits',
     'NotConnectedError',
+    'PeerSettings',
     'ProtocolError',
     'SearchQuery',
     'SearchResult',
@@ -45,8 +50,10 @@ __all__ = [
     'ServerEntry',
     'ServerLink',
     'ServerList',
+    'ShareSettings',
     'Source',
     'StateInUseError',
+    'Timeouts',
     'hash_file',
     'inspect_document',
 ]

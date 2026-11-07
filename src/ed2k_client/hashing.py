@@ -14,12 +14,11 @@ from Crypto.Hash import MD4
 
 from ed2k_client.constants import HASH_LENGTH, PART_SIZE
 from ed2k_client.errors import ProtocolError
+from ed2k_client.settings import DEFAULT_IO
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-READ_CHUNK: int = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -104,6 +103,7 @@ def part_count(size: int) -> int:
     :returns: the number of eD2k parts.
     :rtype: int
     """
+    # aMule's table of sizes and counts: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/KnownFile.cpp#L446
     return size // PART_SIZE + 1
 
 
@@ -115,6 +115,7 @@ def data_part_count(size: int) -> int:
     :returns: the number of parts with at least one byte.
     :rtype: int
     """
+    # Ceiling division, and an empty file still has one empty part
     return max(1, -(-size // PART_SIZE))
 
 
@@ -174,11 +175,13 @@ def expected_part_hash(*, file_hash: Ed2kHash, size: int, part_hashes: Sequence[
     return file_hash.digest if hashset_length(size) == 0 else part_hashes[index]
 
 
-def hash_file(path: Path) -> FileHashes:
+def hash_file(path: Path, *, read_chunk: int = DEFAULT_IO.read_chunk) -> FileHashes:
     """Compute the eD2k hash and hashset of a file on disk.
 
     :param path: the file.
     :type path: Path
+    :param read_chunk: bytes read at a time.
+    :type read_chunk: int
     :returns: the hashes and the size.
     :rtype: FileHashes
     """
@@ -186,16 +189,17 @@ def hash_file(path: Path) -> FileHashes:
     size = 0
     part_size = PART_SIZE
     with path.open('rb') as stream:
-        # A full part is always followed by one more round, so an exact multiple ends with the empty-part hash.
+        # A full part is always followed by one more round, so an exact multiple ends with the empty-part hash
         while part_size == PART_SIZE:
             part = MD4.new()
             part_size = 0
-            while part_size < PART_SIZE and (chunk := stream.read(min(READ_CHUNK, PART_SIZE - part_size))):
+            while part_size < PART_SIZE and (chunk := stream.read(min(read_chunk, PART_SIZE - part_size))):
                 part.update(chunk)
                 part_size += len(chunk)
             size += part_size
             part_hashes.append(part.digest())
 
+    # Below one part the single part hash is the file hash and no hashset exists
     if size < PART_SIZE:
         return FileHashes(file_hash=Ed2kHash(part_hashes[0]), part_hashes=(), size=size)
     return FileHashes(file_hash=hash_from_parts(part_hashes), part_hashes=tuple(part_hashes), size=size)

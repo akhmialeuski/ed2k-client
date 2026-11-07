@@ -45,6 +45,7 @@ class Identity:
         user_hash = bytearray(secrets.token_bytes(HASH_LENGTH))
         for index, value in USER_HASH_MARKERS.items():
             user_hash[index] = value
+
         return cls(user_hash=bytes(user_hash), kad_id=secrets.token_bytes(HASH_LENGTH))
 
     @classmethod
@@ -64,6 +65,9 @@ class Identity:
         if path.exists():
             stored = json.loads(path.read_text(encoding=ENCODING))
             return cls(**{name: bytes.fromhex(value) for name, value in stored.items()})
+
+        # A new hash for a known address reads as a stolen identity, and aMule bans it:
+        # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/BaseClient.cpp#L684
         identity = cls.generate()
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
         with os.fdopen(descriptor, 'w', encoding=ENCODING) as stream:

@@ -17,6 +17,7 @@ from Crypto.Hash import MD4
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
 from ed2k_client.errors import HashMismatchError, ProtocolError
 from ed2k_client.hashing import data_part_count, expected_part_hash, hash_from_parts, hashset_length
+from ed2k_client.settings import DEFAULT_IO
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -31,7 +32,6 @@ DATA_SUFFIX: str = '.part'
 ENCODING: str = 'utf-8'
 READ_BINARY: Literal['rb'] = 'rb'
 UPDATE_BINARY: Literal['r+b'] = 'r+b'
-READ_CHUNK: int = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -75,6 +75,8 @@ def blocks_of_part(*, size: int, part: int) -> list[Block]:
     :returns: the blocks in order.
     :rtype: list[Block]
     """
+    # The last block of a part is shorter when PART_SIZE is not a multiple of BLOCK_SIZE, which it is not:
+    # 9,728,000 = 52 * 184,320 + 143,360, so a block never reaches into the next part
     part_start = part * PART_SIZE
     part_end = min(part_start + PART_SIZE, size)
     return [Block(start, min(start + BLOCK_SIZE, part_end)) for start in range(part_start, part_end, BLOCK_SIZE)]
@@ -97,6 +99,7 @@ class Coverage:
         :param end: offset after the last byte.
         :type end: int
         """
+        # Touching ranges merge too, so two halves of a block become one range that covers it
         merged: list[tuple[int, int]] = []
         for low, high in sorted([*self.ranges, (start, end)]):
             if merged and low <= merged[-1][1]:
@@ -128,7 +131,9 @@ class PartFile:
     :ivar metadata_path: the progress file.
     """
 
-    def __init__(self, *, directory: Path, name: str, size: int, file_hash: Ed2kHash) -> None:
+    def __init__(
+        self, *, directory: Path, name: str, size: int, file_hash: Ed2kHash, read_chunk: int = DEFAULT_IO.read_chunk
+    ) -> None:
         """Create the in-memory state; use :meth:`open` to attach it to disk.
 
         :param directory: the quarantine directory.
@@ -139,6 +144,8 @@ class PartFile:
         :type size: int
         :param file_hash: the eD2k hash.
         :type file_hash: Ed2kHash
+        :param read_chunk: bytes read at a time while a part is hashed.
+        :type read_chunk: int
         """
         self.name = name
         self.size = size
@@ -146,11 +153,16 @@ class PartFile:
         self.part_hashes: tuple[bytes, ...] = ()
         self.verified_parts: set[int] = set()
         self._coverage: dict[Block, Coverage] = {}
+        self._read_chunk = read_chunk
+
+        # Named by hash rather than by the untrusted file name, so no peer can choose a path in quarantine
         self.data_path = directory / f'{file_hash.hex}{DATA_SUFFIX}'
         self.metadata_path = directory / f'{file_hash.hex}{METADATA_SUFFIX}'
 
     @classmethod
-    def open(cls, *, directory: Path, name: str, size: int, file_hash: Ed2kHash) -> Self:
+    def open(
+        cls, *, directory: Path, name: str, size: int, file_hash: Ed2kHash, read_chunk: int = DEFAULT_IO.read_chunk
+    ) -> Self:
         """Open or create the part file of a download, resuming verified parts from an earlier run.
 
         :param directory: the quarantine directory.
@@ -161,20 +173,27 @@ class PartFile:
         :type size: int
         :param file_hash: the eD2k hash.
         :type file_hash: Ed2kHash
+        :param read_chunk: bytes read at a time while a part is hashed.
+        :type read_chunk: int
         :returns: the part file.
         :rtype: Self
         """
         directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
-        part_file = cls(directory=directory, name=name, size=size, file_hash=file_hash)
+        part_file = cls(directory=directory, name=name, size=size, file_hash=file_hash, read_chunk=read_chunk)
+
+        # Only verified parts survive a restart. Blocks of an unfinished part are fetched again, because nothing
+        # proves that bytes written before a crash are the bytes a peer sent
         if part_file.metadata_path.exists() and part_file.data_path.exists():
             state = PartState(**json.loads(part_file.metadata_path.read_text(encoding=ENCODING)))
             if state.size == size:
                 part_file.part_hashes = tuple(bytes.fromhex(item) for item in state.part_hashes)
                 part_file.verified_parts = set(state.verified_parts)
         else:
+            # os.open sets mode 0600 at creation, and ftruncate makes a sparse file that takes no space yet
             descriptor = os.open(part_file.data_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, FILE_MODE)
             os.ftruncate(descriptor, size)
             os.close(descriptor)
+
         part_file.save()
         return part_file
 
@@ -205,6 +224,7 @@ class PartFile:
         :type part_hashes: Sequence[bytes]
         :raises ProtocolError: when the hashset does not belong to the file.
         """
+        # The file hash is the MD4 of the part hashes, so a forged hashset cannot pass this check
         if len(part_hashes) != hashset_length(self.size) or hash_from_parts(part_hashes) != self.file_hash:
             err_msg = f'hashset does not match {self.file_hash}'
             raise ProtocolError(err_msg)
@@ -245,9 +265,12 @@ class PartFile:
         if not data or start < block.start or end > block.end:
             err_msg = f'data from {start} to {end} lies outside block {block}'
             raise ProtocolError(err_msg)
+
         with self.data_path.open(UPDATE_BINARY) as stream:
             stream.seek(start)
             stream.write(data)
+
+        # The part is hashed once, when its last block is covered
         self._coverage.setdefault(block, Coverage()).add(start, end)
         part_blocks = blocks_of_part(size=self.size, part=block.part)
         if not all(b in self._coverage and self._coverage[b].covers(b) for b in part_blocks):
@@ -268,17 +291,22 @@ class PartFile:
         with self.data_path.open(READ_BINARY) as stream:
             stream.seek(start)
             remaining = min(PART_SIZE, self.size - start)
-            while remaining and (chunk := stream.read(min(READ_CHUNK, remaining))):
+            while remaining and (chunk := stream.read(min(self._read_chunk, remaining))):
                 digest.update(chunk)
                 remaining -= len(chunk)
+
         expected = expected_part_hash(
             file_hash=self.file_hash, size=self.size, part_hashes=self.part_hashes, index=part
         )
+
+        # The coverage goes either way: a verified part needs it no more, and a failed part must be fetched again,
+        # which an empty coverage makes every one of its blocks missing for
         for block in blocks_of_part(size=self.size, part=part):
             self._coverage.pop(block, None)
         if digest.digest() != expected:
             err_msg = f'part {part} of {self.file_hash} failed its MD4 check'
             raise HashMismatchError(err_msg, part=part)
+
         self.verified_parts.add(part)
         self.save()
         return part
@@ -290,6 +318,8 @@ class PartFile:
             part_hashes=[item.hex() for item in self.part_hashes],
             verified_parts=sorted(self.verified_parts),
         )
+
+        # Written beside the target and renamed over it, so a crash leaves either the old or the new progress
         temporary = self.metadata_path.with_suffix('.tmp')
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
         with os.fdopen(descriptor, 'w', encoding=ENCODING) as stream:

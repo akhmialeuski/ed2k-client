@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Self
 
-from ed2k_client.constants import LARGE_FILE_THRESHOLD, LOW_ID_LIMIT, MAX_SEARCH_RESULTS, FileTag, SearchOperator
+from ed2k_client.constants import LARGE_FILE_THRESHOLD, LOW_ID_LIMIT, FileTag, SearchOperator
 from ed2k_client.errors import ProtocolError
 from ed2k_client.hashing import Ed2kHash
 from ed2k_client.links import FileLink
@@ -24,12 +24,16 @@ if TYPE_CHECKING:
     from ed2k_client.tags import Tag
     from ed2k_client.wire import Reader
 
+# Kad splits a query at these characters and drops words shorter than three UTF-8 bytes:
+# https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/kademlia/kademlia/SearchManager.cpp#L259
 WORD_SPLIT = re.compile(r'[\s()\[\]{}<>,._\-!?:;\\/"]+')
 MIN_KAD_WORD_BYTES: int = 3
 
 
 class SearchNodeKind(IntEnum):
     """First byte of each node of the search tree."""
+
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/SearchList.cpp#L171
 
     BOOLEAN = 0x00
     KEYWORD = 0x01
@@ -92,12 +96,14 @@ class SearchQuery:
         if not self.words:
             err_msg = 'a search needs at least one word'
             raise ValueError(err_msg)
+
+        # A frozen dataclass sets its own fields only through object.__setattr__
         object.__setattr__(self, 'extensions', tuple(ext.lower().lstrip('.') for ext in self.extensions))
 
     @property
     def words(self) -> tuple[str, ...]:
         """The words of the query, split the way Kad splits them."""
-        # re.split can yield None for unmatched groups, so the type is narrowed to real words.
+        # re.split can yield None for unmatched groups, so the type is narrowed to real words
         return tuple(word for word in WORD_SPLIT.split(self.text) if isinstance(word, str) and word)
 
     @property
@@ -107,6 +113,7 @@ class SearchQuery:
         aMule takes the first word. The longest one is used here because it is usually the rarest, so the
         responsible nodes return fewer unrelated files before the restrictive tree filters them.
         """
+        # aMule's choice: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/kademlia/kademlia/SearchManager.cpp#L156
         candidates = [word.lower() for word in self.words if len(word.encode()) >= MIN_KAD_WORD_BYTES]
         if not candidates:
             err_msg = f'no word of {MIN_KAD_WORD_BYTES} or more bytes in {self.text!r}'
@@ -159,6 +166,8 @@ class SearchResult:
         :rtype: Self
         """
         indexed = tag_map(tags)
+
+        # A size above 4 GiB arrives as SIZE with the low 32 bits and SIZE_HI with the high ones
         size = int_value(indexed, FileTag.SIZE) | int_value(indexed, FileTag.SIZE_HI) << 32
         return cls(
             file_hash=file_hash,
@@ -210,7 +219,6 @@ class SearchResults:
 
 
 def _write_boolean(writer: Writer, operator: BooleanOperator, operands: Sequence[bytes]) -> None:
-    # Prefix notation of a left-deep tree: n operands need n - 1 operators in front of them.
     """Join operands with one boolean operator as a left-deep tree in prefix notation.
 
     :param writer: the tree writer.
@@ -220,6 +228,7 @@ def _write_boolean(writer: Writer, operator: BooleanOperator, operands: Sequence
     :param operands: the encoded operands.
     :type operands: Sequence[bytes]
     """
+    # Prefix notation of a left-deep tree: n operands need n - 1 operators in front of them
     for _ in range(len(operands) - 1):
         writer.u8(SearchNodeKind.BOOLEAN).u8(operator)
     for operand in operands:
@@ -236,6 +245,7 @@ def _string_tag(tag: FileTag, value: str) -> bytes:
     :returns: the node bytes.
     :rtype: bytes
     """
+    # The tag name is written as a one-byte name with a 16-bit length of 1
     return Writer().u8(SearchNodeKind.STRING_TAG).string(value).u16(1).u8(tag).getvalue()
 
 
@@ -253,11 +263,13 @@ def _number_tag(*, tag: FileTag, operator: SearchOperator, value: int, allow_64b
     :returns: the node bytes.
     :rtype: bytes
     """
+    # A receiver without 64-bit support gets the bound clamped to 4 GiB, which is the most it can compare against
     writer = Writer()
     if value > LARGE_FILE_THRESHOLD and allow_64bit:
         writer.u8(SearchNodeKind.NUMBER64).u64(value)
     else:
         writer.u8(SearchNodeKind.NUMBER32).u32(min(value, LARGE_FILE_THRESHOLD))
+
     return writer.u8(operator).u16(1).u8(tag).getvalue()
 
 
@@ -271,6 +283,7 @@ def encode_query(query: SearchQuery, *, allow_64bit: bool = True) -> bytes:
     :returns: the tree bytes.
     :rtype: bytes
     """
+    # Every word must match, and any one of the extensions may, so the extensions form one OR group among the ANDs
     terms = [Writer().u8(SearchNodeKind.KEYWORD).string(word).getvalue() for word in query.words]
     if query.extensions:
         alternatives = Writer()
@@ -278,6 +291,7 @@ def encode_query(query: SearchQuery, *, allow_64bit: bool = True) -> bytes:
         terms.append(alternatives.getvalue())
     if query.file_type is not None:
         terms.append(_string_tag(FileTag.TYPE, query.file_type))
+
     limits = (
         (query.min_size, FileTag.SIZE, SearchOperator.GREATER),
         (query.max_size, FileTag.SIZE, SearchOperator.LESS),
@@ -288,6 +302,7 @@ def encode_query(query: SearchQuery, *, allow_64bit: bool = True) -> bytes:
         for value, tag, operator in limits
         if value > 0
     )
+
     writer = Writer()
     _write_boolean(writer, BooleanOperator.AND, terms)
     return writer.getvalue()
@@ -312,17 +327,20 @@ def parse_server_results(reader: Reader) -> ServerSearchPage:
     :type reader: Reader
     :returns: the page.
     :rtype: ServerSearchPage
-    :raises ProtocolError: when the count exceeds :data:`MAX_SEARCH_RESULTS`.
+    :raises ProtocolError: when the count exceeds the reader's ``search_results`` limit.
     """
     count = reader.u32()
-    if count > MAX_SEARCH_RESULTS:
-        err_msg = f'{count} search results exceed the limit of {MAX_SEARCH_RESULTS}'
+    if count > reader.limits.search_results:
+        err_msg = f'{count} search results exceed the limit of {reader.limits.search_results}'
         raise ProtocolError(err_msg)
+
     results = []
     for _ in range(count):
         file_hash = Ed2kHash(reader.hash16())
         reader.take(6)  # the client ID and port of one source, which OP_GETSOURCES reports properly
         results.append(SearchResult.from_tags(file_hash=file_hash, tags=read_tags(reader), origin=SearchOrigin.SERVER))
+
+    # The trailing flag exists only on servers that page their results
     more = reader.u8() if reader.remaining == 1 else 0
     return ServerSearchPage(results=tuple(results), more_available=bool(more))
 

@@ -2,7 +2,7 @@
 
 Each source gets a worker that runs the peer protocol of :mod:`ed2k_client.peer`. A shared set of blocks in flight
 keeps two peers from fetching the same block. A peer that queues this client is asked again after the reask
-interval only, because eMule bans clients that ask more often than every ten minutes (``MIN_REQUESTTIME`` in aMule).
+interval only, because aMule bans a client that asks again within ``MIN_REQUESTTIME``, 590 seconds, four times.
 A peer whose data fails a part hash or the protocol is banned for the rest of the download. When every part is
 verified, the content is inspected by :func:`check_document` and only a safe document of an expected kind leaves
 quarantine.
@@ -14,12 +14,12 @@ client can use without a server callback or a Kad buddy.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ed2k_client.constants import LARGE_FILE_THRESHOLD, READ_TIMEOUT
+from ed2k_client.constants import LARGE_FILE_THRESHOLD
 from ed2k_client.errors import ConnectionFailedError, DownloadError, HashMismatchError, ProtocolError
 from ed2k_client.peer import PeerConnection, QueuedError
 from ed2k_client.security import (
@@ -29,8 +29,9 @@ from ed2k_client.security import (
     resolve_inside,
     unique_path,
 )
+from ed2k_client.settings import DEFAULT_IO, DEFAULT_PEER, SECONDS_PER_HOUR, check_positive
 from ed2k_client.sources import Source
-from ed2k_client.transport import PacketStream, StreamOptions
+from ed2k_client.transport import PEER_STREAM, PacketStream
 
 if TYPE_CHECKING:
     from ed2k_client.partfile import Block, PartFile
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
         AddressPolicy,
         Inspection,
     )
+    from ed2k_client.settings import IoSettings, PeerSettings
+    from ed2k_client.transport import StreamOptions
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +49,7 @@ type SourceKey = tuple[int, int]
 type SourceFeed = Callable[[], Awaitable[Sequence[Source]]]
 type ProgressCallback = Callable[[DownloadProgress], None]
 
-BLOCKS_PER_REQUEST: int = 3
 FINAL_FILE_MODE: int = 0o600
-POLL_INTERVAL: float = 1.0
-MAX_CONNECT_FAILURES: int = 3
 
 
 class ContentPolicy(StrEnum):
@@ -65,18 +65,28 @@ class DownloadSettings:
 
     :ivar max_peers: sources downloaded from at the same time.
     :ivar queue_wait: seconds to wait on a connection while queued.
-    :ivar reask_interval: seconds before asking a queueing peer again, at least eMule's ten minutes.
+    :ivar reask_interval: seconds before asking a queueing peer again. aMule bans a client that asks again within
+        590 seconds four times, and the default is aMule's own ``FILEREASKTIME``.
     :ivar source_refresh: seconds between two refreshes of the source list.
     :ivar deadline: seconds after which the download gives up.
     :ivar content_policy: which finished files may leave quarantine.
+    :ivar poll_interval: seconds between two rounds of starting workers and reporting progress.
+    :ivar max_connect_failures: failed connections in a row after which a source is dropped.
     """
 
     max_peers: int = 4
     queue_wait: float = 120.0
+    # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/include/protocol/ed2k/Constants.h#L35
     reask_interval: float = 1300.0
     source_refresh: float = 900.0
-    deadline: float = 6 * 3600.0
+    deadline: float = 6 * SECONDS_PER_HOUR
     content_policy: ContentPolicy = ContentPolicy.DOCUMENTS
+    poll_interval: float = 1.0
+    max_connect_failures: int = 3
+
+    def __post_init__(self) -> None:
+        """Check the values."""
+        check_positive(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +143,9 @@ class Downloader:
     :ivar local: this client's description for hellos.
     :ivar policy: which addresses may be dialled.
     :ivar settings: the limits.
+    :ivar stream_options: how connections to sources connect and read, before the queue wait is applied.
+    :ivar peer_settings: how many blocks one request asks for.
+    :ivar io_settings: buffer sizes of the content check.
     :ivar on_progress: called after every verified part and every change of peers.
     """
 
@@ -140,6 +153,9 @@ class Downloader:
     local: LocalPeer
     policy: AddressPolicy
     settings: DownloadSettings = field(default_factory=DownloadSettings)
+    stream_options: StreamOptions = PEER_STREAM
+    peer_settings: PeerSettings = DEFAULT_PEER
+    io_settings: IoSettings = DEFAULT_IO
     on_progress: ProgressCallback | None = None
     _sources: dict[SourceKey, SourceState] = field(default_factory=dict)
     _in_flight: set[Block] = field(default_factory=set)
@@ -157,6 +173,7 @@ class Downloader:
         """
         added = 0
         for source in sources:
+            # A Low ID is a server-local number rather than an address, so there is nothing to dial
             key = (source.client_id, source.port)
             if key in self._sources or source.is_low_id or not self.policy.permits(source.host, source.port):
                 continue
@@ -191,22 +208,28 @@ class Downloader:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.deadline
         next_refresh = 0.0
+
+        # One loop schedules everything: it refreshes sources, starts workers for sources that are due and reports,
+        # while the workers themselves write blocks as they arrive
         try:
             while not self.part_file.complete:
                 now = loop.time()
                 if now >= deadline:
                     err_msg = f'{self.part_file.name}: deadline passed with {self.part_file.verified_bytes} bytes'
                     raise DownloadError(err_msg)
+
                 if now >= next_refresh:
                     logger.info('%d new sources', self.add_sources(await feed()))
                     next_refresh = now + self.settings.source_refresh
+
                 self._start_workers(now)
                 self._report()
-                await asyncio.sleep(POLL_INTERVAL)
+                await asyncio.sleep(self.settings.poll_interval)
         finally:
             for task in self._workers.values():
                 task.cancel()
             await asyncio.gather(*self._workers.values(), return_exceptions=True)
+
         return self._release(download_dir)
 
     def _start_workers(self, now: float) -> None:
@@ -220,6 +243,7 @@ class Downloader:
                 return
             if key in self._workers or state.banned or state.next_try > now:
                 continue
+
             task = asyncio.create_task(self._work(state))
             self._workers[key] = task
 
@@ -245,14 +269,18 @@ class Downloader:
         key = (source.client_id, source.port)
         loop = asyncio.get_running_loop()
         obfuscate_for = source.user_hash if source.wants_obfuscation else None
+
+        # A queued connection stays silent until the slot arrives, so its idle timeout must cover the queue wait
+        idle = max(self.stream_options.idle_timeout or 0.0, self.settings.queue_wait)
         try:
             async with await PacketStream.connect(
                 host=source.host,
                 port=source.port,
                 obfuscate_for=obfuscate_for,
-                options=StreamOptions(idle_timeout=max(READ_TIMEOUT, self.settings.queue_wait)),
+                options=replace(self.stream_options, idle_timeout=idle),
             ) as stream:
-                await self._transfer(PeerConnection(stream=stream, local=self.local), key=key)
+                connection = PeerConnection(stream=stream, local=self.local, settings=self.peer_settings)
+                await self._transfer(connection, key=key)
             state.failures = 0
             state.next_try = loop.time() + self.settings.reask_interval
         except QueuedError as queued:
@@ -263,13 +291,15 @@ class Downloader:
             state.banned = True
         except ConnectionFailedError as error:
             state.failures += 1
-            state.banned = state.failures >= MAX_CONNECT_FAILURES
+            state.banned = state.failures >= self.settings.max_connect_failures
             state.next_try = loop.time() + self.settings.reask_interval
             logger.info('%s:%d failed (%s)', source.host, source.port, error)
         finally:
+            # A part pinned to this peer becomes free for anyone once the peer is gone
             for part, owner in self._exclusive.items():
                 if owner == key:
                     self._exclusive[part] = None
+
         self._report()
 
     async def _transfer(self, connection: PeerConnection, *, key: SourceKey) -> None:
@@ -283,10 +313,15 @@ class Downloader:
         part_file = self.part_file
         await connection.hello()
         status = await connection.request_file(file_hash=part_file.file_hash, size=part_file.size)
+
+        # A file of one part has no hashset, because its file hash is the part hash
         if part_file.needs_hashset:
             part_file.set_hashset(await connection.request_hashset(part_file.file_hash))
+
+        # A peer with nothing new is not asked for a slot, so it does not count the request against this client
         if not any(True for _ in part_file.missing_blocks(parts=set(status.parts))):
             return
+
         await connection.request_upload(part_file.file_hash, queue_wait=self.settings.queue_wait)
         large = part_file.size > LARGE_FILE_THRESHOLD
         while blocks := self._claim(set(status.parts), key=key):
@@ -319,15 +354,15 @@ class Downloader:
         try:
             verified = self.part_file.write(block=block, start=offset, data=data)
         except HashMismatchError as error:
+            # The writer is always among the suspects, because it was added above. Alone it is banned by raising,
+            # which ends its worker, and among others the part is handed to the next single peer instead
             suspects = self._contributors.pop(error.part, set())
             if suspects == {key}:
                 raise
-            if len(suspects) == 1:
-                self._sources[suspects.pop()].banned = True
-            else:
-                self._exclusive[error.part] = None
+            self._exclusive[error.part] = None
             logger.warning('Part %d failed its hash with %d contributors', error.part, len(suspects))
             return
+
         if verified is not None:
             self._contributors.pop(verified, None)
             self._exclusive.pop(verified, None)
@@ -345,15 +380,18 @@ class Downloader:
         """
         if self._sources[key].banned:
             return []
+
         claimed = []
         for block in self.part_file.missing_blocks(parts=parts):
+            # A part in _exclusive is free while its owner is None and pinned to one peer otherwise
             if block in self._in_flight or self._exclusive.get(block.part, key) not in {key, None}:
                 continue
             if block.part in self._exclusive:
                 self._exclusive[block.part] = key
             claimed.append(block)
-            if len(claimed) == BLOCKS_PER_REQUEST:
+            if len(claimed) == self.peer_settings.blocks_per_request:
                 break
+
         self._in_flight.update(claimed)
         return claimed
 
@@ -367,10 +405,16 @@ class Downloader:
         :raises SecurityError: when the content policy refuses the file.
         """
         part_file = self.part_file
+
+        # check_document raises SecurityError on a refused file, which leaves it in quarantine, while the ANY policy
+        # only records what the inspection found
         if self.settings.content_policy == ContentPolicy.DOCUMENTS:
-            inspection = check_document(part_file.data_path, expected=(DocumentKind.PDF, DocumentKind.DJVU))
+            inspection = check_document(
+                part_file.data_path, expected=(DocumentKind.PDF, DocumentKind.DJVU), io=self.io_settings
+            )
         else:
-            inspection = inspect_document(part_file.data_path)
+            inspection = inspect_document(part_file.data_path, io=self.io_settings)
+
         target = unique_path(resolve_inside(download_dir, part_file.name))
         part_file.data_path.replace(target)
         Path(target).chmod(FINAL_FILE_MODE)
