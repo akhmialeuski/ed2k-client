@@ -36,34 +36,34 @@ ignore = [
     "FIX", # fixme: TODO/FIXME comments (tracked separately)
     "S", # bandit: security checks (handled by security review, not linter)
     "TD", # todos: TODO format enforcement (tracked separately)
-    # Formatter compatibility (required when using ruff format)
-    "COM812", # missing-trailing-comma
-    "COM819", # prohibited-trailing-comma
-    "D206", # indent-with-spaces
-    "E111", # indentation-with-invalid-multiple
-    "E114", # indentation-with-invalid-multiple-comment
-    "E117", # over-indented
-    "Q000", # bad-quotes-inline-string
-    "Q001", # bad-quotes-multiline-string
-    "Q002", # bad-quotes-docstring
-    "Q003", # avoidable-escaped-quote
+    # Formatter compatibility: ruff format owns these, and the linter would fight it
+    "missing-trailing-comma", # COM812
+    "prohibited-trailing-comma", # COM819
+    "docstring-tab-indentation", # D206
+    "indentation-with-invalid-multiple", # E111
+    "indentation-with-invalid-multiple-comment", # E114
+    "over-indented", # E117
+    "bad-quotes-inline-string", # Q000
+    "bad-quotes-multiline-string", # Q001
+    "bad-quotes-docstring", # Q002
+    "avoidable-escaped-quote", # Q003
     # Project-wide policy ignores
-    "D213", # multi-line docstring summary at second line (conflicts with D212)
+    "multi-line-summary-second-line", # D213, conflicts with multi-line-summary-first-line (D212)
     # ruff's pydoclint reads Google and NumPy sections only, so it cannot see the reST fields of the python-coding
     # standard. Its docstring_fields.py checks :returns: and :rtype: on functions and generators alike.
-    "DOC201", # return not in docstring
-    "DOC402", # yield not in docstring
-    "DOC403", # extraneous yields section
-    "DOC501", # exception not in docstring
-    "CPY001", # missing copyright header
-    "N818", # exception name Error suffix (too strict)
-    "PLR6301", # method could be function/static (too noisy)
+    "docstring-missing-returns", # DOC201
+    "docstring-missing-yields", # DOC402
+    "docstring-extraneous-yields", # DOC403
+    "docstring-missing-exception", # DOC501
+    "missing-copyright-notice", # CPY001
+    "error-suffix-on-exception-name", # N818, too strict
+    "no-self-use", # PLR6301, too noisy
 ]
 extend-ignore = [
-    "ANN401", # typing.Any disallowed
-    "D417", # missing argument descriptions in docstring
-    "N815", # mixedCase in class scope
-    "RUF002", # ambiguous character in docstring
+    "any-type", # ANN401
+    "undocumented-param", # D417
+    "mixed-case-variable-in-class-scope", # N815
+    "ambiguous-unicode-character-docstring", # RUF002
 ]
 exclude = [
     "*.pyi", ".bzr", ".direnv", ".eggs", ".git", ".hg",
@@ -78,26 +78,26 @@ max-complexity = 8 # at full coverage CRAP equals complexity, so 8 is what a CRA
 
 [lint.per-file-ignores]
 "__init__.py" = [
-    "E402", # import violations
-    "F401", # unused imports
+    "module-import-not-at-top-of-file", # E402
+    "unused-import", # F401
 ]
 "tests/**" = [
-    "ARG005", # unused lambda argument
-    "FBT001", # pytest passes parametrized booleans positionally
-    "D104", # missing docstring in public package
-    "E501", # line too long
-    "PLC1901", # compare to empty string
-    "PLC2801", # unnecessary encode
-    "PLR2004", # magic value in comparison
-    "PT019", # fixture without value
-    "RET504", # unnecessary assignment before return
-    "SLF001", # private member access
-    "T201", # tests use print
+    "unused-lambda-argument", # ARG005
+    "boolean-type-hint-positional-argument", # FBT001, pytest passes parametrized booleans positionally
+    "undocumented-public-package", # D104
+    "line-too-long", # E501
+    "compare-to-empty-string", # PLC1901
+    "unnecessary-dunder-call", # PLC2801
+    "magic-value-comparison", # PLR2004
+    "pytest-fixture-param-without-value", # PT019
+    "unnecessary-assign", # RET504
+    "private-member-access", # SLF001
+    "print", # T201, tests use print
 ]
 "**/cli.py" = [
-    "T201", # CLI output uses print
+    "print", # T201, CLI output uses print
 ]
 "scripts/**" = [
-    "INP001", # scripts are run by path and are intentionally not a package
-    "T201", # scripts report to the terminal with print
+    "implicit-namespace-package", # INP001, scripts are run by path and are intentionally not a package
+    "print", # T201, scripts report to the terminal with print
 ]
