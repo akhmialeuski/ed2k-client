@@ -1,4 +1,4 @@
-"""Shared helpers of the integration tests: configs, payloads, sources and spies on what a seeder serves."""
+"""Shared helpers of the tests: configs, payloads, server lists, sources and spies on what a seeder serves."""
 
 import random
 import socket
@@ -8,14 +8,20 @@ from typing import TYPE_CHECKING
 
 from ed2k_client import ClientConfig, DownloadSettings, SecurityError, Source
 from ed2k_client.constants import CryptOption
+from ed2k_client.servermet import SERVER_NAME_TAG, USERS_TAG
 from ed2k_client.share import SharedFile
 from ed2k_client.sources import SourceOrigin, client_id_from_host
+from ed2k_client.tags import Tag, write_tags
+from ed2k_client.wire import Writer
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
-    from ed2k_client import Client
+    from ed2k_client import Client, ServerEntry
     from ed2k_client.share import SharedLibrary
+
+SERVER_MET_HEADER = 0xE0
 
 LOOPBACK = '127.0.0.1'
 PDF_HEADER = b'%PDF-1.7\n'
@@ -23,6 +29,21 @@ DJVU_HEADER = b'AT&TFORM\x00\x00\x00\x00DJVM'
 PATTERN = bytes(range(251))
 STREAM_TAIL = b'\nendstream\nendobj\n'
 FAST = DownloadSettings(max_peers=4, queue_wait=10.0, reask_interval=1.0, source_refresh=2.0, deadline=60.0)
+
+
+def server_met(servers: Sequence[ServerEntry]) -> bytes:
+    """Write a ``server.met`` that lists servers with their names and user counts, as aMule writes one.
+
+    :param servers: the servers to list.
+    :type servers: Sequence[ServerEntry]
+    :returns: the file content.
+    :rtype: bytes
+    """
+    writer = Writer().u8(SERVER_MET_HEADER).u32(len(servers))
+    for server in servers:
+        writer.ed2k_ip(server.host).u16(server.port)
+        write_tags(writer, [Tag(SERVER_NAME_TAG, server.name), Tag(USERS_TAG, server.users)])
+    return writer.getvalue()
 
 
 def free_port() -> int:
