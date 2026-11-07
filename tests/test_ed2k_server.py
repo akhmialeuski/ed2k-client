@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ed2k_client import Client, FileLink, SearchQuery, hash_file
+from ed2k_client import Client, ConnectionFailedError, FileLink, SearchQuery, ServerEntry, hash_file
 from ed2k_client.constants import PART_SIZE, PeerOp, Protocol
 from ed2k_client.identity import Identity
 from ed2k_client.partfile import blocks_of_part
@@ -188,6 +188,28 @@ async def test_low_id_seeder_serves_through_a_callback(tmp_path: Path) -> None:
 
     assert seeder.status.low_id
     assert data == (shelf / BOOK).read_bytes()[first_block.start : first_block.end]
+
+
+async def test_login_fails_at_once_when_the_server_hangs_up() -> None:
+    """A server that closes the connection after the login request fails the login at once, not after the timeout."""
+
+    async def hang_up(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(1)
+        writer.close()
+
+    listener = await asyncio.start_server(hang_up, LOOPBACK, 0)
+    entry = ServerEntry(host=LOOPBACK, port=listener.sockets[0].getsockname()[1])
+    details = LoginDetails(identity=Identity.generate(), tcp_port=4662, nickname=REMOTE)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        with pytest.raises(ConnectionFailedError, match='closed the connection'):
+            await ServerSession.login(entry=entry, details=details)
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert loop.time() - started < WAIT_LIMIT
 
 
 async def test_server_going_away_leaves_the_client_usable(tmp_path: Path) -> None:

@@ -268,13 +268,23 @@ class ServerSession:
 
         # The reader starts before the wait, because the ID arrives as an ordinary packet after messages and status
         session._reader_task = asyncio.create_task(session._read_loop())
-        try:
-            await asyncio.wait_for(session._login_done.wait(), timeouts.server_login)
-        except TimeoutError as error:
-            await session.close()
+
+        # The reader ends when the server hangs up, which settles the login as failed without waiting out the timeout
+        assigned = asyncio.ensure_future(session._login_done.wait())
+        await asyncio.wait(
+            {assigned, session._reader_task}, timeout=timeouts.server_login, return_when=asyncio.FIRST_COMPLETED
+        )
+        assigned.cancel()
+        if session._login_done.is_set():
+            return session
+
+        hung_up = session._reader_task.done()
+        await session.close()
+        if hung_up:
+            err_msg = f'{entry.address} closed the connection before assigning an ID'
+        else:
             err_msg = f'{entry.address} assigned no ID within {timeouts.server_login} s'
-            raise ConnectionFailedError(err_msg) from error
-        return session
+        raise ConnectionFailedError(err_msg)
 
     @property
     def is_low_id(self) -> bool:
