@@ -25,7 +25,6 @@ MET_HEADERS: frozenset[int] = frozenset({0x0E, 0xE0})
 # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/ServerList.cpp#L756
 SERVER_NAME_TAG: int = 0x01
 SERVER_DESCRIPTION_TAG: int = 0x0B
-SERVER_MAX_USERS_TAG: int = 0x87
 USERS_TAG: str = 'users'
 FILES_TAG: str = 'files'
 DEFAULT_SERVER_MET_URL: str = 'https://upd.emule-security.org/server.met'
