@@ -66,6 +66,11 @@ PDF_STRING_TOKEN = re.compile(rb'\\.|[()]', re.DOTALL)
 PDF_LINE_END = re.compile(rb'[\r\n]')
 PDF_STREAM_END: bytes = b'endstream'
 
+# A reader reaches an object by its xref offset wherever it lies, so the header of an object written inside another
+# stream's body ends that body for the scan too. The obj keyword follows whitespace in every object header, and in
+# compressed data whitespace and obj without a name character after them occur about once in a gigabyte
+PDF_STREAM_EXIT = re.compile(re.escape(PDF_STREAM_END) + b'|' + PDF_WHITESPACE + rb'obj(?![A-Za-z0-9#])')
+
 # Longer than endstream, a stream start with a little whitespace and every key of interest, so a match across two
 # chunks is seen whole. A stream start padded beyond it is not recognised, which only makes the scan longer
 SCAN_OVERLAP: int = 64
@@ -402,12 +407,13 @@ class PdfKeyScan:
         """
         position = segment = 0
         while position < safe:
-            # Inside a stream body nothing counts until endstream
+            # Inside a stream body nothing counts until endstream or an object header, which is scanned from its start
             if self.mode is PdfLexMode.STREAM:
-                end = window.find(PDF_STREAM_END, position)
-                if end < 0 or end >= safe:
+                exit_token = PDF_STREAM_EXIT.search(window, position)
+                if exit_token is None or exit_token.start() >= safe:
                     return safe
-                position = segment = end + len(PDF_STREAM_END)
+                ended = exit_token.group() == PDF_STREAM_END
+                position = segment = exit_token.end() if ended else exit_token.start()
                 self.mode = PdfLexMode.OUTSIDE
                 continue
 

@@ -35,6 +35,7 @@ PUBLIC_IP = '8.8.8.8'
 LOOPBACK = '127.0.0.1'
 PORT = 4662
 JS = 'JS'
+JAVASCRIPT = 'JavaScript'
 SOURCE_DIR = Path('/src')
 ZIP_ARCHIVE = 'ZIP archive'
 MACRO_DANGER = 'Office document with macros'
@@ -128,7 +129,7 @@ class TestInspectDocument:
         ('content', 'kind', 'dangerous'),
         [
             (b'%PDF-1.7\n/Type /Catalog /OpenAction 3 0 R', DocumentKind.PDF, ()),
-            (b'%PDF-1.4\n<< /S /J#61vaScript /JS (x) >>', DocumentKind.PDF, (JS, 'JavaScript')),
+            (b'%PDF-1.4\n<< /S /J#61vaScript /JS (x) >>', DocumentKind.PDF, (JS, JAVASCRIPT)),
             (b'%PDF-1.4\n/Launch /EmbeddedFile', DocumentKind.PDF, ('EmbeddedFile', 'Launch')),
             (b'%PDF-1.4\n1 0 obj << >> stream\n\x00/JS\x00 endstream /Type', DocumentKind.PDF, ()),
             (b'%PDF-1.4\n<< /JS 2 0 R >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
@@ -137,6 +138,12 @@ class TestInspectDocument:
             (b'%PDF-1.4\n<< /T (a\\) (b) >> stream\n) /JS 1 0 R >>\n<< >> stream\nendstream', DocumentKind.PDF, (JS,)),
             (b'%PDF-1.4\n%>> stream\n<< /JS 1 0 R >>\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
             (b'%PDF-1.4\n/Xstream\n/JS 1 0 R\n<< >> stream\nabc\nendstream', DocumentKind.PDF, (JS,)),
+            # A reader reaches an object by its xref offset even inside another stream's body, so the scan does too
+            (
+                b'%PDF-1.4\n9 0 obj << >> stream\n5 0 obj << /S /JavaScript /JS (x) >> endobj\nendstream',
+                DocumentKind.PDF,
+                (JS, JAVASCRIPT),
+            ),
             (b'AT&TFORM\x00\x00\x00\x10DJVM', DocumentKind.DJVU, ()),
             (b'MZ\x90\x00', DocumentKind.OTHER, ('Windows executable',)),
             (b'PK\x03\x04', DocumentKind.OTHER, ()),
@@ -176,7 +183,7 @@ class TestInspectDocument:
         path = QUARANTINE / 'edge.pdf'
         fs.create_file(path, contents=trap)
 
-        assert inspect_document(path).dangerous == ('JavaScript',)
+        assert inspect_document(path).dangerous == (JAVASCRIPT,)
 
     def test_pdf_string_spanning_read_chunks_keeps_its_stream_keyword_inert(self, fs: FakeFilesystem) -> None:
         """A string opened in one read chunk still holds a fake stream start that arrives in the next one.
