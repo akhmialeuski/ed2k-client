@@ -152,6 +152,7 @@ def _row(result: SearchResult) -> dict[str, object]:
         'sources': result.sources,
         'complete': result.complete_sources,
         'origin': result.origin,
+        'seen_on': result.seen_on,
         'ed2k': str(result.link),
     }
 
@@ -171,8 +172,10 @@ async def _search(arguments: argparse.Namespace) -> None:
         print(json.dumps([_row(result) for result in results], ensure_ascii=False, indent=2))
         return
 
+    # The first number after the index counts the servers and Kad that reported the file
     for index, result in enumerate(results, 1):
-        print(f'{index:3} {result.sources:4} {result.size / MEBIBYTE:8.1f} MiB  {result.origin:6} {result.name}')
+        size = result.size / MEBIBYTE
+        print(f'{index:3} {result.seen_on:2}x {result.sources:4} {size:8.1f} MiB  {result.origin:6} {result.name}')
         print(f'    {result.link}')
 
 

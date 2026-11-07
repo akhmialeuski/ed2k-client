@@ -7,7 +7,8 @@ part of a Kad keyword search.
 """
 
 import re
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING, Self
 
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
 
     from ed2k_client.tags import Tag
     from ed2k_client.wire import Reader
+
+# A file as the network names it: the eD2k hash and the size an answer gives for it
+type FileKey = tuple[Ed2kHash, int]
 
 # Kad splits a query at these characters and drops words shorter than three UTF-8 bytes:
 # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/kademlia/kademlia/SearchManager.cpp#L259
@@ -131,11 +135,14 @@ class SearchQuery:
         return not self.extensions or name.lower().rpartition('.')[2] in self.extensions
 
     def matches_words(self, name: str) -> bool:
-        """Check that a file name contains every word of the query, ignoring case.
+        """Check that a file name holds every word of the query, ignoring case.
+
+        A server or a Kad node answers only with names holding the words, so a name without them comes from a fake
+        server or a poisoned index. A word counts inside a longer one, so an honest name such as ``Kademlia's`` stays.
 
         :param name: the file name.
         :type name: str
-        :returns: whether each word occurs in the name.
+        :returns: whether every word occurs in the name.
         :rtype: bool
         """
         lowered = name.lower()
@@ -164,6 +171,7 @@ class SearchResult:
     :ivar complete_sources: the number of sources with the complete file.
     :ivar file_type: the indexed file type.
     :ivar origin: where the result came from.
+    :ivar seen_on: how many of the servers and Kad reported the file, each counted once.
     """
 
     file_hash: Ed2kHash
@@ -173,6 +181,7 @@ class SearchResult:
     complete_sources: int = 0
     file_type: str = ''
     origin: SearchOrigin = SearchOrigin.SERVER
+    seen_on: int = 1
 
     @classmethod
     def from_tags(cls, *, file_hash: Ed2kHash, tags: Iterable[Tag], origin: SearchOrigin) -> Self:
@@ -214,30 +223,50 @@ class SearchResult:
 
 @dataclass(slots=True)
 class SearchResults:
-    """Results merged by file hash, the way a client shows one row per distinct file.
+    """Results merged by file hash and size, the way a client shows one row per distinct file.
 
-    :ivar by_hash: the best result seen for each hash.
+    One hash names one content and so one size, so answers that disagree on the size hold at least one lie. Nothing
+    tells which, and dropping the hash would let a single fake server or Kad node hide any file by echoing it with
+    another size, so each size stays a row of its own and the one more independent indexes report ranks first.
+
+    :ivar by_file: the best result seen for each hash and size, with the number of reporters that sent it.
     """
 
-    by_hash: dict[Ed2kHash, SearchResult] = field(default_factory=dict)
+    by_file: dict[FileKey, SearchResult] = field(default_factory=dict)
+    _reporters: dict[FileKey, set[str]] = field(default_factory=dict)
 
-    def add(self, result: SearchResult) -> None:
-        """Merge one result, keeping the higher source count.
+    @property
+    def conflicting(self) -> set[Ed2kHash]:
+        """The hashes the answers gave more than one size for."""
+        sizes = Counter(file_hash for file_hash, _ in self.by_file)
+        return {file_hash for file_hash, count in sizes.items() if count > 1}
+
+    def add(self, result: SearchResult, *, reporter: str) -> None:
+        """Merge one result, keeping the higher source count and counting each reporter of the file once.
 
         :param result: the result.
         :type result: SearchResult
+        :param reporter: who sent it, such as a server address or ``kad``.
+        :type reporter: str
         """
-        known = self.by_hash.get(result.file_hash)
-        if known is None or result.sources > known.sources:
-            self.by_hash[result.file_hash] = result
+        key = (result.file_hash, result.size)
+        reporters = self._reporters.setdefault(key, set())
+        reporters.add(reporter)
+        known = self.by_file.get(key)
+        best = result if known is None or result.sources > known.sources else known
+        self.by_file[key] = replace(best, seen_on=len(reporters))
 
     def ranked(self) -> list[SearchResult]:
-        """List the results with the most sources first.
+        """List the files reported by the most servers first, then those with the most sources.
+
+        A file that several independent indexes report is the hardest one for a single fake server to plant.
 
         :returns: the sorted results.
         :rtype: list[SearchResult]
         """
-        return sorted(self.by_hash.values(), key=lambda item: (-item.complete_sources, -item.sources, item.name))
+        return sorted(
+            self.by_file.values(), key=lambda item: (-item.seen_on, -item.complete_sources, -item.sources, item.name)
+        )
 
 
 def _write_boolean(writer: Writer, operator: BooleanOperator, operands: Sequence[bytes]) -> None:

@@ -154,6 +154,11 @@ Everything that arrives from the network is untrusted, and these are the defence
   HTTPS on entering the client, cached in the state directory and fetched again after `ip_filter_refresh`, seven
   days by default. A failed download keeps the old copy, and without one the client runs unfiltered after a warning.
   `ip_filter` names a local file instead, and an empty `ip_filter_url` turns the filter off.
+- Search answers are checked against the query and against each other: a result whose name lacks a word of the
+  query is dropped, since only a fake server or a poisoned index sends one, and a file reported by more servers and
+  Kad ranks first, shown as `seen_on`, because a single fake server cannot plant it in independent indexes. A hash
+  that answers give different sizes for is listed once per size, so a fake server echoing it with another size adds
+  a row that ranks below the size the honest indexes agree on and cannot hide the file.
 - File names from the network are sanitised to one path component and every write is proved to stay inside its
   directory, which defeats `../` and absolute-path tricks.
 - Downloaded data stays in quarantine until its eD2k hash and every part hash match, and a part that matched is never

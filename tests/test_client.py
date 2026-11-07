@@ -10,6 +10,8 @@ import pytest
 
 from ed2k_client.client import IP_FILTER_CACHE, SERVER_MET_CACHE, Client, ClientConfig
 from ed2k_client.constants import PeerOp, Protocol
+from ed2k_client.hashing import Ed2kHash, md4
+from ed2k_client.search import SearchResult
 from ed2k_client.security import IpFilter
 from ed2k_client.servermet import ServerEntry, ServerList
 from ed2k_client.share import SharedLibrary
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
     from unittest.mock import MagicMock
 
     from pyfakefs.fake_filesystem import FakeFilesystem
+
+    from ed2k_client.search import SearchQuery
 
 pytestmark = pytest.mark.usefixtures('fs')
 
@@ -37,6 +41,9 @@ FILTER_TEXT = b'001.002.003.000 - 001.002.003.255 , 000 , fakes\n'
 BLOCKED = '1.2.3.4'
 # A modification time at the epoch is older than any refresh interval
 EPOCH = 0
+KEYWORD = 'kademlia'
+SHARED_BOOK = 'Kademlia Explained.pdf'
+OTHER_BOOK = 'Kademlia Notes.djvu'
 
 # A first byte that is no protocol byte starts an obfuscation handshake, and zeros never carry its sync value
 NOT_A_HANDSHAKE = b'\x01' + bytes(64)
@@ -213,3 +220,83 @@ class TestAutomaticIpFilter:
 
         assert not (await client._automatic_ip_filter()).blocks(BLOCKED)
         assert 'without an IP filter' in caplog.text
+
+
+class AnsweringSession:
+    """A live server session that answers every search with the same results.
+
+    :ivar entry: the server.
+    :ivar connected: whether the session is open, always.
+    """
+
+    def __init__(self, entry: ServerEntry, results: list[SearchResult]) -> None:
+        """Keep the answer.
+
+        :param entry: the server.
+        :type entry: ServerEntry
+        :param results: the results of every search.
+        :type results: list[SearchResult]
+        """
+        self.entry = entry
+        self.connected = True
+        self._results = results
+
+    async def search(self, query: SearchQuery, *, max_results: int) -> list[SearchResult]:
+        """Return the prepared answer whatever was asked.
+
+        :param query: the query, unused.
+        :type query: SearchQuery
+        :param max_results: the cap on results, unused.
+        :type max_results: int
+        :returns: the prepared results.
+        :rtype: list[SearchResult]
+        """
+        del query, max_results
+        return list(self._results)
+
+
+def _result(seed: bytes, name: str, size: int) -> SearchResult:
+    """Build a search result whose hash is derived from a seed.
+
+    :param seed: the bytes the hash is the MD4 of.
+    :type seed: bytes
+    :param name: the published name.
+    :type name: str
+    :param size: the size in bytes.
+    :type size: int
+    :returns: the result.
+    :rtype: SearchResult
+    """
+    return SearchResult(file_hash=Ed2kHash(md4(seed)), name=name, size=size)
+
+
+class TestSearch:
+    """Tests of how :meth:`Client.search` checks the answers of several servers against each other."""
+
+    async def test_unrelated_answers_are_dropped_and_disputed_sizes_listed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A file both servers report leads, names without the words are dropped, and each size of a hash is a row.
+
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        shared, single = _result(b'shared', SHARED_BOOK, 10), _result(b'single', OTHER_BOOK, 20)
+        client = Client(CONFIG)
+        client._servers = [
+            AnsweringSession(BUSY, [shared, _result(b'disputed', OTHER_BOOK, 30)]),
+            AnsweringSession(
+                QUIET, [shared, single, _result(b'junk', 'setup.exe', 40), _result(b'disputed', OTHER_BOOK, 99)]
+            ),
+        ]
+
+        results = await client.search(KEYWORD)
+
+        assert [(result.name, result.size, result.seen_on) for result in results] == [
+            (SHARED_BOOK, 10, 2),
+            (OTHER_BOOK, 30, 1),
+            (OTHER_BOOK, 20, 1),
+            (OTHER_BOOK, 99, 1),
+        ]
+        assert f'{QUIET.address} sent 1 results without the words of the query' in caplog.text
+        assert '1 files arrived with several sizes' in caplog.text

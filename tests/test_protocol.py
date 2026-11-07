@@ -2,17 +2,18 @@
 
 import struct
 import zlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 from ed2k_client.constants import Protocol
 from ed2k_client.errors import ProtocolError
-from ed2k_client.hashing import Ed2kHash
+from ed2k_client.hashing import Ed2kHash, md4
 from ed2k_client.kad.contacts import KadId, parse_nodes_dat
 from ed2k_client.links import FileLink, ServerLink
 from ed2k_client.obfuscation import PROTOCOL_BYTES, derive_ciphers, semi_random_marker
-from ed2k_client.search import SearchQuery, encode_query, parse_server_results
+from ed2k_client.search import SearchQuery, SearchResult, SearchResults, encode_query, parse_server_results
 from ed2k_client.servermet import ServerList
 from ed2k_client.tags import Tag, read_tags, write_tags
 from ed2k_client.wire import U32, Reader, Writer, inflate, unpack_payload
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
 LIVE_TREE_HEX = '0000010800737072696e6765720001020300706466010004020400646a7675010004'
 SAMPLE_HASH = Ed2kHash.from_hex('E737E3459E12C22118C48306FAE1D8EB')
 BOOK = 'book.pdf'
+FIRST_SERVER = '203.0.113.10:4661'
+SECOND_SERVER = '203.0.113.20:4242'
+THIRD_SERVER = '198.51.100.66:4661'
+KAD = 'kad'
 SERVER_LINK = 'ed2k://|server|45.82.80.155|5687|/'
 
 
@@ -116,6 +121,58 @@ class TestSearchQuery:
         assert SearchQuery(text='An Introduction to Kademlia').kad_keyword == 'introduction'
         with pytest.raises(ValueError, match='no word'):
             _ = SearchQuery(text='a b').kad_keyword
+
+    @pytest.mark.parametrize(
+        ('name', 'matches'),
+        [
+            ('Kademlia Explained.pdf', True),
+            ("KADEMLIA'S EXPLAINED.djvu", True),
+            ('Kademlia.mp4', False),
+            ('setup.exe', False),
+        ],
+        ids=['same case', 'other case inside a longer word', 'one word missing', 'neither word'],
+    )
+    def test_name_must_hold_every_word(self, name: str, matches: bool) -> None:
+        """A name matches only when it holds every word of the query, in any case and inside longer words.
+
+        :param name: the published file name.
+        :type name: str
+        :param matches: whether the name may stay in the results.
+        :type matches: bool
+        """
+        assert SearchQuery(text='kademlia explained').matches_words(name) is matches
+
+
+class TestSearchResults:
+    """Tests of :class:`SearchResults`."""
+
+    def test_file_reported_by_more_servers_ranks_first(self) -> None:
+        """A file several servers report outranks one with more sources from a single server, each counted once."""
+        merged = SearchResults()
+        lonely = SearchResult(file_hash=Ed2kHash(md4(b'lonely')), name=BOOK, size=10, sources=900)
+        shared = SearchResult(file_hash=SAMPLE_HASH, name=BOOK, size=10, sources=3)
+        merged.add(lonely, reporter=FIRST_SERVER)
+        for reporter in (FIRST_SERVER, FIRST_SERVER, SECOND_SERVER):
+            merged.add(shared, reporter=reporter)
+
+        assert [(result.file_hash, result.seen_on) for result in merged.ranked()] == [
+            (SAMPLE_HASH, 2),
+            (lonely.file_hash, 1),
+        ]
+
+    def test_forged_size_cannot_hide_a_file_more_servers_report(self) -> None:
+        """A size one reporter gives a known hash becomes a row of its own, below the size the others agree on.
+
+        One hash names one content and so one size, but nothing tells which answer lies. Dropping the hash would let a
+        single fake server or Kad node hide any file by echoing it with another size.
+        """
+        merged = SearchResults()
+        honest = SearchResult(file_hash=SAMPLE_HASH, name=BOOK, size=10)
+        for result, reporter in ((honest, FIRST_SERVER), (replace(honest, size=99), THIRD_SERVER), (honest, KAD)):
+            merged.add(result, reporter=reporter)
+
+        assert [(result.size, result.seen_on) for result in merged.ranked()] == [(10, 2), (99, 1)]
+        assert merged.conflicting == {SAMPLE_HASH}
 
 
 class TestParseServerResults:

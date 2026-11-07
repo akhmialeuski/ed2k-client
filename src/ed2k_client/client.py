@@ -72,6 +72,7 @@ LOCK_FILE: str = 'client.lock'
 ANY_PORT: int = 0
 SERVER_MET_CACHE: str = 'server.met'
 IP_FILTER_CACHE: str = 'ipfilter.dat'
+KAD_REPORTER: str = 'kad'
 DEFAULT_NICKNAME: str = 'ed2k-client'
 SERVERS_KEY: str = 'servers'
 DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({'pdf', 'djvu', 'djv'})
@@ -526,18 +527,21 @@ class Client:
             query = SearchQuery(text=query)
 
         # Every server and Kad are asked at once, and one that fails costs only its own results
-        merged = SearchResults()
+        reporters = [session.entry.address for session in self._live_servers]
         searches = [session.search(query, max_results=max_results) for session in self._live_servers]
         if self._kad is not None:
+            reporters.append(KAD_REPORTER)
             searches.append(self._kad.search_keyword(query))
 
-        for outcome in await asyncio.gather(*searches, return_exceptions=True):
+        merged = SearchResults()
+        for reporter, outcome in zip(reporters, await asyncio.gather(*searches, return_exceptions=True), strict=True):
             if isinstance(outcome, BaseException):
-                logger.warning('A search failed: %r', outcome)
+                logger.warning('The search on %s failed: %r', reporter, outcome)
                 continue
-            for result in outcome:
-                merged.add(result)
+            _merge_answer(merged, query=query, reporter=reporter, results=outcome)
 
+        if merged.conflicting:
+            logger.warning('%d files arrived with several sizes, each listed once per size', len(merged.conflicting))
         return merged.ranked()[:max_results]
 
     async def find_sources(self, *, file_hash: Ed2kHash, size: int) -> list[Source]:
@@ -721,6 +725,30 @@ class Client:
                 await connection.serve(library=self.library, slots=self._slots)
         except (ConnectionFailedError, ProtocolError) as error:
             logger.info('Callback to %s:%d failed: %s', host, port, error)
+
+
+def _merge_answer(merged: SearchResults, *, query: SearchQuery, reporter: str, results: Sequence[SearchResult]) -> None:
+    """Merge one server's or Kad's answer, dropping the results whose names lack the query's words.
+
+    :param merged: the results gathered so far.
+    :type merged: SearchResults
+    :param query: the query the answer is for.
+    :type query: SearchQuery
+    :param reporter: who sent the answer, a server address or ``kad``.
+    :type reporter: str
+    :param results: the answer.
+    :type results: Sequence[SearchResult]
+    """
+    unrelated = 0
+    for result in results:
+        if query.matches_words(result.name):
+            merged.add(result, reporter=reporter)
+        else:
+            unrelated += 1
+
+    # Only a fake server or a poisoned index answers with names that lack the words it was asked for
+    if unrelated:
+        logger.warning('%s sent %d results without the words of the query', reporter, unrelated)
 
 
 def _file_type(name: str) -> str:
