@@ -3,7 +3,7 @@
 import random
 import socket
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ed2k_client import ClientConfig, DownloadSettings, SecurityError, Source
@@ -142,7 +142,6 @@ class ServeSpy:
 
     served: int = 0
     hook: ReadHook | None = None
-    _ranges: list[tuple[int, int]] = field(default_factory=list)
 
     def install(self, library: SharedLibrary) -> None:
         """Wrap the library's read method.
@@ -168,7 +167,6 @@ class ServeSpy:
             if self.hook is not None:
                 data = self.hook(shared, start, end, data)
             self.served += len(data)
-            self._ranges.append((start, end))
             return data
 
         library.read = read
