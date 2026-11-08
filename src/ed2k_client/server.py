@@ -424,7 +424,7 @@ class ServerSession:
                     break
                 await self._stream.send(protocol=Protocol.EDONKEY, opcode=ServerOp.QUERY_MORE_RESULT)
 
-        return [result for result in results if query.matches_extension(result.name)][:max_results]
+        return [result for result in results if query.accepts(result)][:max_results]
 
     async def get_sources(self, *, file_hash: Ed2kHash, size: int) -> list[Source]:
         """Ask the server which of its users share a file.

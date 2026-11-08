@@ -357,7 +357,7 @@ class KadNode:
             target=target, opcode=KadOp.SEARCH_KEY_REQ, payload=payload, limit=limit
         ):
             result = SearchResult.from_tags(file_hash=file_hash, tags=tags, origin=SearchOrigin.KAD)
-            if query.matches_extension(result.name) and result.size > 0:
+            if query.accepts(result):
                 results.setdefault(file_hash, result)
 
         return list(results.values())[: self._limits.search_results]

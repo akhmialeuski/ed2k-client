@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Self
 from ed2k_client.constants import LARGE_FILE_THRESHOLD, LOW_ID_LIMIT, FileTag, SearchOperator
 from ed2k_client.errors import ProtocolError
 from ed2k_client.hashing import Ed2kHash
-from ed2k_client.links import FileLink
+from ed2k_client.links import FileLink, valid_file_size
 from ed2k_client.tags import int_value, read_tags, str_value, tag_map
 from ed2k_client.wire import Writer
 
@@ -129,6 +129,17 @@ class SearchQuery:
         :rtype: bool
         """
         return not self.extensions or name.lower().rpartition('.')[2] in self.extensions
+
+    def accepts(self, result: SearchResult) -> bool:
+        """Check a result from a server or Kad against the extensions and the sizes a file can have.
+
+        :param result: the result.
+        :type result: SearchResult
+        :returns: whether the result is kept.
+        :rtype: bool
+        """
+        # The size is untrusted, and a link built from an impossible one never completes or breaks the part file
+        return self.matches_extension(result.name) and valid_file_size(result.size)
 
 
 @dataclass(frozen=True, slots=True)

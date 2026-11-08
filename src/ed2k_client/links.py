@@ -26,6 +26,18 @@ MAX_PORT: int = 65_535
 DECIMAL = re.compile(r'[0-9]+')
 
 
+def valid_file_size(size: int) -> bool:
+    """Check that a size from the network is one a file can have.
+
+    :param size: the size in bytes.
+    :type size: int
+    :returns: whether it lies between 1 byte and the largest eD2k file.
+    :rtype: bool
+    """
+    # A file of 0 bytes has no block to request, and one beyond the largest file has no valid part offsets
+    return 0 < size <= MAX_FILE_SIZE
+
+
 @dataclass(frozen=True, slots=True)
 class FileLink:
     """A link to a file.
@@ -58,7 +70,7 @@ class FileLink:
 
         # The name stays untrusted here and is sanitised only where it becomes a file name
         name, size_text, hash_text = unquote(fields[1]), fields[2], fields[3]
-        if not DECIMAL.fullmatch(size_text) or not 0 < int(size_text) <= MAX_FILE_SIZE:
+        if not DECIMAL.fullmatch(size_text) or not valid_file_size(int(size_text)):
             err_msg = f'invalid size in link: {size_text!r}'
             raise ProtocolError(err_msg)
 

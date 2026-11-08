@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ed2k_client import Client, Ed2kHash, hash_file
-from ed2k_client.constants import KadOp, Protocol
+from ed2k_client.constants import MAX_FILE_SIZE, KadOp, Protocol
 from ed2k_client.hashing import md4
 from ed2k_client.kad.contacts import KadId
 from ed2k_client.kad.node import BOOTSTRAP_REQUEST
@@ -39,6 +39,7 @@ SOURCE_DIR = 'src'
 NODES_DAT = 'nodes.dat'
 OPCODE_OF = attrgetter('opcode')
 FORGED_NAME = 'forged.pdf'
+OVERSIZED_NAME = 'Kademlia Oversized.pdf'
 
 
 def kad_config(root: Path, name: str, network: FakeKadNetwork, **overrides: object) -> ClientConfig:
@@ -108,6 +109,25 @@ class TestSearch:
             (BOOK, 5_000_000, SearchOrigin.KAD)
         ]
         assert responsible.received >= 2
+
+    async def test_result_beyond_the_largest_file_is_dropped(self, tmp_path: Path) -> None:
+        """A Kad result whose size no file can have is left out, while the honest result beside it is kept.
+
+        The size comes from the publishing node, and a size beyond the largest file breaks the part file it opens.
+
+        :param tmp_path: the directory the client keeps its files in.
+        :type tmp_path: Path
+        """
+        async with FakeKadNetwork() as network:
+            await network.publish_keyword(KEYWORD, file_hash=Ed2kHash(md4(b'a')), name=BOOK, size=5_000_000)
+            await network.publish_keyword(
+                KEYWORD, file_hash=Ed2kHash(md4(b'b')), name=OVERSIZED_NAME, size=MAX_FILE_SIZE + 1
+            )
+            async with Client(kad_config(tmp_path, LEECHER, network)) as client:
+                await client.connect_kad()
+                results = await client.search(KEYWORD)
+
+        assert [result.name for result in results] == [BOOK]
 
     async def test_unsolicited_answers_are_dropped(self, tmp_path: Path) -> None:
         """A forged search answer from an address the client never asked is ignored.
