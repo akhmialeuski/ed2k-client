@@ -130,6 +130,17 @@ class SearchQuery:
         """
         return not self.extensions or name.lower().rpartition('.')[2] in self.extensions
 
+    def matches_words(self, name: str) -> bool:
+        """Check that a file name contains every word of the query, ignoring case.
+
+        :param name: the file name.
+        :type name: str
+        :returns: whether each word occurs in the name.
+        :rtype: bool
+        """
+        lowered = name.lower()
+        return all(word.lower() in lowered for word in self.words)
+
     def accepts(self, result: SearchResult) -> bool:
         """Check a result from a server or Kad against the extensions and the sizes a file can have.
 

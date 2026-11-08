@@ -209,6 +209,7 @@ class ServerSession:
         self._search_pages: asyncio.Queue[Packet] = asyncio.Queue(maxsize=limits.server_result_pages)
         self._source_waiters: dict[Ed2kHash, asyncio.Future[list[Source]]] = {}
         self._search_lock = asyncio.Lock()
+        self._owed_pages = 0
         self._login_done = asyncio.Event()
         self._reader_task: asyncio.Task[None] | None = None
         self._background: set[asyncio.Task[None]] = set()
@@ -407,7 +408,9 @@ class ServerSession:
         tree = encode_query(query, allow_64bit=allow_64bit)
         results: list[SearchResult] = []
 
-        # Result pages carry no search id, so one search at a time, and pages left from a timed-out search are dropped
+        # Result pages carry no search id, so one search runs at a time. Pages queued before the request are dropped,
+        # and a page that a timed-out request still owes can arrive after it, so while one is owed a page in which no
+        # name holds the words of this query belongs to that earlier request
         async with self._search_lock:
             while not self._search_pages.empty():
                 self._search_pages.get_nowait()
@@ -417,8 +420,12 @@ class ServerSession:
                 try:
                     packet = await asyncio.wait_for(self._search_pages.get(), self._timeouts.server_search)
                 except TimeoutError:
+                    self._owed_pages += 1
                     break
                 page = parse_server_results(packet.reader())
+                if self._owed_pages and not any(query.matches_words(result.name) for result in page.results):
+                    self._owed_pages -= 1
+                    continue
                 results.extend(page.results)
                 if not page.more_available or len(results) >= max_results:
                     break
