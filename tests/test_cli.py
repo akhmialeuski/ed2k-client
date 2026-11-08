@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 OFFLINE = ['--no-server', '--no-kad']
 SEARCH = ['search', 'kademlia']
 MISSING = '/missing/book.pdf'
+SHELF = '/books'
+HASH = 'hash'
 NO_SUCH_PATH = 'error: no such file or directory: '
 MISSING_NAME = 'missing.dat'
 GOOD_LINK = 'ed2k://|file|a.pdf|5|E737E3459E12C22118C48306FAE1D8EB|/'
@@ -96,7 +98,7 @@ class TestMain:
 
     @pytest.mark.parametrize(
         'arguments',
-        [['hash', MISSING], [SHARE, MISSING, '--seconds', '0', '--port', '0', *OFFLINE]],
+        [[HASH, MISSING], [SHARE, MISSING, '--seconds', '0', '--port', '0', *OFFLINE]],
         ids=['hashed file', 'shared path'],
     )
     def test_missing_path_argument_is_a_usage_error(
@@ -115,6 +117,23 @@ class TestMain:
         code = main(arguments)
 
         assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'{NO_SUCH_PATH}{MISSING}\n')
+
+    def test_directory_to_hash_is_a_usage_error(self, fs: FakeFilesystem, capsys: pytest.CaptureFixture[str]) -> None:
+        """A directory given to hash is reported in one line, as hash reads files only.
+
+        The directory exists, so the check for missing paths lets it through, and reading it as a file ends in a
+        traceback with exit code 1.
+
+        :param fs: the in-memory file system that holds the directory.
+        :type fs: FakeFilesystem
+        :param capsys: the captured output.
+        :type capsys: pytest.CaptureFixture[str]
+        """
+        fs.create_dir(SHELF)
+
+        code = main([HASH, SHELF])
+
+        assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'error: not a file: {SHELF}\n')
 
 
 @pytest.mark.integration

@@ -315,13 +315,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _check_local_paths(arguments: argparse.Namespace, config: ClientConfig) -> None:
-    """Refuse a local file or directory that the command line or the settings name and that does not exist.
+    """Refuse a local path that the command line or the settings name and that does not exist or has the wrong kind.
 
     :param arguments: the parsed command line.
     :type arguments: argparse.Namespace
     :param config: the settings built from the configuration file and the flags.
     :type config: ClientConfig
     :raises FileNotFoundError: for the first path that does not exist.
+    :raises IsADirectoryError: for a path to hash that is a directory, since hash reads files only.
     """
     named = [
         *getattr(arguments, PATHS_ARGUMENT, ()),
@@ -333,6 +334,11 @@ def _check_local_paths(arguments: argparse.Namespace, config: ClientConfig) -> N
         if not path.exists():
             err_msg = f'no such file or directory: {path}'
             raise FileNotFoundError(err_msg)
+
+    for name in getattr(arguments, PATHS_ARGUMENT, ()):
+        if Path(name).is_dir():
+            err_msg = f'not a file: {name}'
+            raise IsADirectoryError(err_msg)
 
 
 def _parse_inputs(arguments: argparse.Namespace) -> None:
