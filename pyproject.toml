@@ -7,9 +7,17 @@ requires-python = ">=3.14"
 # Versions read from PyPI on 2026-11-06. Tools are pinned with ==, libraries take a >= floor,
 # and uv.lock fixes what gets installed.
 dependencies = [
-    # Runtime dependencies (>= floor): MD4 and RC4, which OpenSSL 3 no longer offers through hashlib
+    # MD4 and RC4, which OpenSSL 3 no longer offers through hashlib
     "pycryptodome>=3.20.0",
-    # Dev / test dependencies
+]
+
+[project.scripts]
+ed2k-client = "ed2k_client.cli:main"
+
+# PEP 735 groups never reach the wheel's metadata, and uv sync and uv run install the dev group by default
+[dependency-groups]
+dev = [
+    # Test dependencies
     "pre-commit==4.7.0",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1",
@@ -23,9 +31,6 @@ dependencies = [
     "ruff==0.17.4",
     "ty==0.0.99",
 ]
-
-[project.scripts]
-ed2k-client = "ed2k_client.cli:main"
 
 [tool.uv]
 link-mode = "copy"
