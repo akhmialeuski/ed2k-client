@@ -25,7 +25,6 @@ LIVE_TREE_HEX = '0000010800737072696e6765720001020300706466010004020400646a76750
 SAMPLE_HASH = Ed2kHash.from_hex('E737E3459E12C22118C48306FAE1D8EB')
 BOOK = 'book.pdf'
 SERVER_LINK = 'ed2k://|server|45.82.80.155|5687|/'
-UINT32 = '<I'
 
 
 class TestReader:
@@ -212,7 +211,6 @@ class TestParseNodesDat:
         contacts = parse_nodes_dat(data)
 
         assert [(c.host, c.udp_port, c.version) for c in contacts] == [('90.94.50.178', 4672, 10)]
-        assert UINT32 == '<I'
 
 
 class TestDeriveCiphers:
