@@ -1,5 +1,6 @@
 """Download a bootstrap list (``server.met`` or ``nodes.dat``) over HTTPS with a size cap."""
 
+import http.client
 import urllib.request
 
 from ed2k_client.errors import ProtocolError
@@ -21,19 +22,25 @@ def fetch_https(url: str, *, limit: int, timeout: float) -> bytes:
     :type timeout: float
     :returns: the body.
     :rtype: bytes
-    :raises ProtocolError: when the URL, or the one it redirects to, is not HTTPS or the body is too large.
+    :raises ProtocolError: when the URL, or the one it redirects to, is not HTTPS, the body is too large or the
+        response breaks the HTTP framing.
     """
     if not url.startswith(HTTPS_PREFIX):
         err_msg = f'bootstrap lists are fetched over HTTPS only, not {url}'
         raise ProtocolError(err_msg)
 
     # urlopen follows a redirect to plain HTTP too, so the address the body comes from is checked before it is read.
-    # One byte more than the limit is enough to tell an oversized body without reading all of it
-    with urllib.request.urlopen(url, timeout=timeout) as response:
-        if not (final_url := response.geturl()).startswith(HTTPS_PREFIX):
-            err_msg = f'{url} redirected to {final_url}, which is not HTTPS'
-            raise ProtocolError(err_msg)
-        data = bytes(response.read(limit + 1))
+    # One byte more than the limit is enough to tell an oversized body without reading all of it. urllib wraps only an
+    # OSError in URLError, so a broken status line or a body cut short arrives as an HTTPException, which is no OSError
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if not (final_url := response.geturl()).startswith(HTTPS_PREFIX):
+                err_msg = f'{url} redirected to {final_url}, which is not HTTPS'
+                raise ProtocolError(err_msg)
+            data = bytes(response.read(limit + 1))
+    except http.client.HTTPException as error:
+        err_msg = f'{url} sent a broken HTTP response: {error!r}'
+        raise ProtocolError(err_msg) from error
 
     if len(data) > limit:
         err_msg = f'{url} is larger than {limit} bytes'
