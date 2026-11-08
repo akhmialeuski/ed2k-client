@@ -6,7 +6,8 @@ sources and download, and a Low ID seeder serves a peer that reached it through 
 
 import asyncio
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
@@ -32,6 +33,7 @@ from tests.helpers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from unittest.mock import MagicMock
 
 pytestmark = pytest.mark.integration
 
@@ -48,6 +50,7 @@ WAIT_LIMIT = 10.0
 FIRST_BOOK = 'Kademlia First Steps.pdf'
 SECOND_BOOK = 'Kademlia Second Thoughts.pdf'
 SMALL_BOOK = 5_000
+MEMORY_FAILURE = 'memory update failed'
 
 
 def library(root: Path) -> Path:
@@ -265,6 +268,44 @@ class TestConnect:
                 await client.connect()
 
         assert ServerMemory.load(config.state_dir).addresses == [server.entry.address]
+
+    @patch.object(ServerMemory, 'remember', side_effect=RuntimeError(MEMORY_FAILURE))
+    async def test_session_is_closed_with_the_client_when_remembering_fails(
+        self, remember: MagicMock, tmp_path: Path
+    ) -> None:
+        """A session that logged in is closed with the client even when the step after the login fails.
+
+        The client promises to close every socket it opens, so a session joins the client's exit stack before
+        anything else can raise.
+
+        :param remember: the memory update, which fails right after the login.
+        :type remember: MagicMock
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        del remember
+        opened: list[ServerSession] = []
+        login = ServerSession.login
+
+        async def recording_login(**kwargs: Any) -> ServerSession:
+            """Log in as the client would and keep the session for the check.
+
+            :param kwargs: the arguments of :meth:`ServerSession.login`.
+            :type kwargs: Any
+            :returns: the session.
+            :rtype: ServerSession
+            """
+            session = await login(**kwargs)
+            opened.append(session)
+            return session
+
+        async with FakeServer() as server:
+            with patch.object(ServerSession, 'login', side_effect=recording_login):
+                async with Client(make_config(tmp_path, LEECHER, servers=(server.entry,))) as client:
+                    with pytest.raises(RuntimeError, match=MEMORY_FAILURE):
+                        await client.connect()
+
+        assert [session.connected for session in opened] == [False]
 
 
 class TestSearch:

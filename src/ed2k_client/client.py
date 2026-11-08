@@ -435,9 +435,11 @@ class Client:
             logger.warning('Server %s refused: %s', entry.address, error)
             return None
 
+        # The exit stack takes the session before anything else can raise, so the client always closes it
+        opened = await self._exits.enter_async_context(session)
         self._server_memory.remember(entry)
         logger.info('Logged in to %s with ID %d', entry.address, session.state.client_id)
-        return await self._exits.enter_async_context(session)
+        return opened
 
     async def connect_kad(self) -> int:
         """Join Kad from ``nodes.dat``.
