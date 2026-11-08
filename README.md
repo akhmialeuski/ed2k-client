@@ -208,7 +208,7 @@ queue, after an interruption, from a seeder that comes online late, through a se
 and Kad search with sources from each network. The pre-commit gate runs ruff, ty, mypy, pyrefly and the unit tests:
 
 ```bash
-uv run pre-commit run --all-files --config PoCs/ed2k-client/.pre-commit-config.yaml
+uv run pre-commit run --all-files
 ```
 
 ## Limitations

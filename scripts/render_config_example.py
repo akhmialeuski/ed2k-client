@@ -4,7 +4,7 @@ The example lists every setting with its default, so it is generated rather than
 in the code changes the example in the same commit. With ``--check`` the script only compares and fails when the
 committed file is stale, which is how the pre-commit gate runs it.
 
-Usage from ``PoCs/ed2k-client``::
+Usage from the repository root::
 
     uv run scripts/render_config_example.py
     uv run scripts/render_config_example.py --check
