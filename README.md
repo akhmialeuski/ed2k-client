@@ -13,10 +13,21 @@ for the extensions `pdf` and `djvu` and the `--documents-only` policy still serv
 ## Installation
 
 The package needs Python 3.14 and one runtime dependency, [pycryptodome](https://www.pycryptodome.org/), which
-provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4.
+provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4. Until the first
+release reaches PyPI, the `ed2k-client` command or the library installs from this repository:
+
+```bash
+uv tool install git+https://github.com/akhmialeuski/ed2k-client
+pip install git+https://github.com/akhmialeuski/ed2k-client
+```
+
+A checkout for development gets the tools of the `dev` dependency group, which never reach the published package,
+and the pre-commit hook that runs the gate described under [Tests](#tests). The examples below use `uv run` from
+such a checkout, and an installed package runs the same commands without it:
 
 ```bash
 uv sync
+uv run pre-commit install --install-hooks
 ```
 
 ## Using the library
@@ -208,7 +219,7 @@ queue, after an interruption, from a seeder that comes online late, through a se
 and Kad search with sources from each network. The pre-commit gate runs ruff, ty, mypy, pyrefly and the unit tests:
 
 ```bash
-uv run pre-commit run --all-files --config PoCs/ed2k-client/.pre-commit-config.yaml
+uv run pre-commit run --all-files
 ```
 
 ## Limitations
@@ -218,3 +229,9 @@ High ID peers and be reached only through a server callback, because Kad buddies
 implemented. It does not serve AICH hashes to other peers, and does not implement source exchange, server UDP
 queries, Kad publishing, Secure User Identification or the obfuscated server connection. Some servers accept a
 login and still ignore searches. On 2026-11-06 eMule Sunrise did so while ed2k-rust answered.
+
+## License and lawful use
+
+ed2k-client is free software under the GNU General Public License, version 3 or later, whose text is in
+[LICENSE](LICENSE). The client downloads and shares whatever the network offers. Before you fetch or share a file,
+make sure you have the right to do so where you live.
