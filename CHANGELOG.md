@@ -6,6 +6,8 @@ Every notable change to ed2k-client is listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-08
+
 ### Added
 
 - A `Client` library that logs in to several eD2k servers at once, joins Kad, searches both networks for files of
@@ -18,3 +20,6 @@ Every notable change to ed2k-client is listed here. The format follows
 - The `ed2k-client` command line with `search`, `download`, `share`, `servers` and `hash`, configured by flags or
   a TOML file.
 - The package metadata for PyPI under GPL-3.0-or-later.
+
+[Unreleased]: https://github.com/akhmialeuski/ed2k-client/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/akhmialeuski/ed2k-client/releases/tag/v0.1.0

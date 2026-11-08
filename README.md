@@ -13,12 +13,18 @@ for the extensions `pdf` and `djvu` and the `--documents-only` policy still serv
 ## Installation
 
 The package needs Python 3.14 and one runtime dependency, [pycryptodome](https://www.pycryptodome.org/), which
-provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4. Until the first
-release reaches PyPI, the `ed2k-client` command or the library installs from this repository:
+provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4. The
+`ed2k-client` command installs as a uv tool, and the library installs into a project with pip:
+
+```bash
+uv tool install ed2k-client
+pip install ed2k-client
+```
+
+The unreleased state of `main` installs the same way from the repository:
 
 ```bash
 uv tool install git+https://github.com/akhmialeuski/ed2k-client
-pip install git+https://github.com/akhmialeuski/ed2k-client
 ```
 
 A checkout for development gets the tools of the `dev` dependency group, which never reach the published package,
