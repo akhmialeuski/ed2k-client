@@ -225,6 +225,26 @@ uv run pre-commit run --all-files
 GitHub Actions runs the same gate and the integration suite on every push to `main` and every pull request, on
 Linux with Python 3.14, as [ci.yml](.github/workflows/ci.yml) describes. The network suite runs only by hand.
 
+## Releasing
+
+A release goes out from `main` in three steps:
+
+1. A pull request moves the entries under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) into a section for the new
+   version and sets `version` in `pyproject.toml` to the same number.
+2. After that pull request is merged, a tag naming that version is pushed on `main`, here for 0.1.0:
+
+   ```bash
+   git tag v0.1.0 origin/main
+   git push origin v0.1.0
+   ```
+
+3. [release.yml](.github/workflows/release.yml) checks that the tag matches the project version, builds the
+   package, publishes it to TestPyPI and installs it back from there. It then waits for the owner to approve the
+   `pypi` environment in the Actions tab, publishes the same files to PyPI and installs them from PyPI.
+
+Both indexes trust the workflow through trusted publishing, so the repository holds no API token. PyPI never
+accepts the same version twice, so a broken release is fixed by the next version.
+
 ## Limitations
 
 The client is a Low ID client when its TCP port is not reachable from the internet. It can then download only from
