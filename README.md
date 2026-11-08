@@ -155,7 +155,7 @@ Everything that arrives from the network is untrusted, and these are the defence
   manifest. Other archives pass `safe` as notable, because their other members are not inspected. Released files are
   mode 0600, never executable.
 - Sharing is off until `share()` is called. Peers name files only by hash, symbolic links are not shared, and a
-  file changed on disk after hashing is withdrawn instead of served.
+  file changed or deleted on disk after hashing is withdrawn instead of served.
 - Kad answers are accepted only from a node the client is waiting on for that opcode, which drops forged answers.
 - `server.met` and `nodes.dat` are fetched over HTTPS only, and a redirect to plain HTTP is refused.
 

@@ -173,14 +173,20 @@ class SharedLibrary:
         :type end: int
         :returns: the bytes.
         :rtype: bytes
-        :raises SecurityError: when the range is invalid or the file changed since it was hashed.
+        :raises SecurityError: when the range is invalid, or the file changed or vanished since it was hashed.
         """
         if not 0 <= start < end <= shared.size:
             err_msg = f'range {start}-{end} is invalid for {shared.size} bytes'
             raise SecurityError(err_msg)
 
-        # A changed file would be served under a hash it no longer has, so it is withdrawn instead
-        stat = shared.path.stat()
+        # A changed file would be served under a hash it no longer has, and a deleted one under no file at all, so
+        # either is withdrawn instead
+        try:
+            stat = shared.path.stat()
+        except OSError as error:
+            self._files.pop(shared.file_hash, None)
+            err_msg = f'{shared.path} can no longer be read and is no longer shared'
+            raise SecurityError(err_msg) from error
         if (stat.st_size, stat.st_mtime_ns) != (shared.size, shared.mtime_ns):
             self._files.pop(shared.file_hash, None)
             err_msg = f'{shared.path} changed since it was hashed and is no longer shared'
