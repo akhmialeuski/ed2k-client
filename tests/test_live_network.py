@@ -1,8 +1,8 @@
 """Checks against the live eD2k and Kad networks.
 
-They run only with ``-m network`` on a host that may reach the network, because the development laptop is not
-allowed to. The assertions are deliberately loose about counts, since the live network changes from hour to hour,
-and strict about what must hold for any answer: types, extensions and the safety filters.
+They run only with ``-m network``, on a host that may reach the live network. The assertions are deliberately loose
+about counts, since the live network changes from hour to hour, and strict about what must hold for any answer:
+types, extensions and the safety filters.
 """
 
 import asyncio
