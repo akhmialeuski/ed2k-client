@@ -168,6 +168,7 @@ class Downloader:
     _workers: dict[SourceKey, asyncio.Task[None]] = field(default_factory=dict)
     _contributors: dict[int, set[SourceKey]] = field(default_factory=dict)
     _exclusive: dict[int, SourceKey | None] = field(default_factory=dict)
+    _failure: BaseException | None = None
 
     def add_sources(self, sources: Sequence[Source]) -> int:
         """Remember new sources that this client can dial.
@@ -209,7 +210,7 @@ class Downloader:
         :type download_dir: Path
         :returns: the finished file.
         :rtype: DownloadResult
-        :raises DownloadError: when the deadline passes first.
+        :raises DownloadError: when the deadline passes first, or a worker fails for a reason no peer causes.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.deadline
@@ -219,6 +220,11 @@ class Downloader:
         # while the workers themselves write blocks as they arrive
         try:
             while not self.part_file.complete:
+                # A local failure such as a full disk would hit every peer the same way, so it ends the download
+                if self._failure is not None:
+                    err_msg = f'{self.part_file.name}: {self._failure}'
+                    raise DownloadError(err_msg) from self._failure
+
                 now = loop.time()
                 if now >= deadline:
                     err_msg = f'{self.part_file.name}: deadline passed with {self.part_file.verified_bytes} bytes'
@@ -253,15 +259,19 @@ class Downloader:
             task = asyncio.create_task(self._work(state))
             self._workers[key] = task
 
-            def forget(_: asyncio.Task[None], key: SourceKey = key) -> None:
-                """Drop a finished worker from the table.
+            def forget(finished: asyncio.Task[None], key: SourceKey = key) -> None:
+                """Drop a finished worker from the table and keep the error that ended it, which no peer caused.
 
-                :param _: the finished task.
-                :type _: asyncio.Task[None]
+                :param finished: the finished task.
+                :type finished: asyncio.Task[None]
                 :param key: the source the worker served.
                 :type key: SourceKey
                 """
                 self._workers.pop(key, None)
+
+                # _work settles every peer outcome itself, so an exception that leaves it is local
+                if not finished.cancelled() and (error := finished.exception()) is not None:
+                    self._failure = error
 
             task.add_done_callback(forget)
 
