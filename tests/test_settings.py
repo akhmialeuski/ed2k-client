@@ -138,6 +138,18 @@ class TestClientConfigFromMapping:
         assert config.limits == replace(Limits(), string_bytes=4096)
         assert config.timeouts == Timeouts()
 
+    def test_nested_table_keeps_the_other_values_of_the_base(self) -> None:
+        """A table that sets one value of a group keeps the group's other values from the base configuration.
+
+        Values missing from the table keep those of the base, so a file layered over another configuration changes
+        only what it names, inside a group as at the top level.
+        """
+        base = replace(ClientConfig(), download=replace(DownloadSettings(), deadline=100.0))
+
+        config = ClientConfig.from_mapping({'download': {'max_peers': 2}}, base=base)
+
+        assert config.download == replace(base.download, max_peers=2)
+
 
 class TestClientConfigFromToml:
     """Tests of :meth:`ClientConfig.from_toml`."""

@@ -216,7 +216,7 @@ DEFAULT_SHARE = ShareSettings()
 DEFAULT_IO = IoSettings()
 
 
-def _convert(*, kind: Any, value: object, where: str) -> object:
+def _convert(*, kind: Any, value: object, where: str, base: Any) -> object:
     """Turn one TOML value into the type a settings field declares.
 
     :param kind: the declared type of the field.
@@ -225,6 +225,8 @@ def _convert(*, kind: Any, value: object, where: str) -> object:
     :type value: object
     :param where: the dotted key, for the error message.
     :type where: str
+    :param base: the field's current value, whose own fields a nested table overrides.
+    :type base: Any
     :returns: the converted value.
     :rtype: object
     :raises TypeError: when the value does not fit the type.
@@ -233,10 +235,11 @@ def _convert(*, kind: Any, value: object, where: str) -> object:
     # Path | None and the like: convert to the member that is not None
     if isinstance(kind, types.UnionType):
         members = [member for member in typing.get_args(kind) if member is not type(None)]
-        return _convert(kind=members[0], value=value, where=where)
+        return _convert(kind=members[0], value=value, where=where, base=base)
 
+    # A nested table changes only the fields it names, so the others keep the values of the base
     if isinstance(kind, type) and is_dataclass(kind):
-        return settings_from_mapping(kind, value, prefix=f'{where}.')
+        return settings_from_mapping(kind, value, prefix=f'{where}.', base=base)
 
     if isinstance(kind, type) and issubclass(kind, enum.Enum):
         try:
@@ -291,5 +294,9 @@ def settings_from_mapping[T: DataclassInstance](
         err_msg = f'unknown setting {LIST_SEPARATOR.join(prefix + key for key in unknown)}'
         raise ValueError(err_msg)
 
-    changes = {key: _convert(kind=hints[key], value=value, where=prefix + key) for key, value in data.items()}
-    return replace(base if base is not None else cls(), **changes)
+    current = base if base is not None else cls()
+    changes = {
+        key: _convert(kind=hints[key], value=value, where=prefix + key, base=getattr(current, key))
+        for key, value in data.items()
+    }
+    return replace(current, **changes)
