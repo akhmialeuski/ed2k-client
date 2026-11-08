@@ -4,6 +4,9 @@ The fake server evaluates the binary search tree it receives against its index, 
 semantics of the encoded query, and it sends its result pages zlib-packed the way Lugdunum servers do. The fake Kad
 nodes answer only when the receiver ID in ``KADEMLIA2_REQ`` is theirs and search only inside the 2^120 tolerance
 zone, the two checks a real aMule node makes.
+
+The scripted stream stands in for one :class:`PacketStream` in unit tests. ``create_autospec`` cannot read the
+signatures of :class:`PacketStream`, because its annotations name imports that exist only for type checkers.
 """
 
 import asyncio
@@ -21,15 +24,19 @@ from ed2k_client.hashing import Ed2kHash, md4
 from ed2k_client.kad.contacts import KadId
 from ed2k_client.search import BooleanOperator, SearchNodeKind
 from ed2k_client.servermet import ServerEntry
+from ed2k_client.settings import DEFAULT_LIMITS
 from ed2k_client.sources import client_id_from_host
 from ed2k_client.tags import Tag, int_value, read_tags, str_value, tag_map, write_tags
 from ed2k_client.transport import PacketStream, StreamOptions
 from ed2k_client.wire import Reader, Writer, decode_udp, encode_udp
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
     from types import TracebackType
+
+    from ed2k_client.errors import Ed2kError
+    from ed2k_client.wire import Packet
 
 LOOPBACK = '127.0.0.1'
 LOOPBACK_IP = int(ipaddress.IPv4Address(LOOPBACK))
@@ -642,3 +649,83 @@ class FakeKadNetwork:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(writer.getvalue())
         return path
+
+
+class ScriptedStream:
+    """A peer connection that hands out prepared packets and then reports itself closed.
+
+    :ivar peer: the remote address.
+    :ivar limits: the caps of the connection.
+    :ivar closed: whether the connection was closed through its context.
+    """
+
+    def __init__(
+        self, packets: Sequence[Packet], *, peer: tuple[str, int], send_error: Ed2kError | None = None
+    ) -> None:
+        """Queue the packets the peer sends.
+
+        :param packets: the packets in the order the peer sends them.
+        :type packets: Sequence[Packet]
+        :param peer: the remote address.
+        :type peer: tuple[str, int]
+        :param send_error: raised by every send, as on a connection the peer reset, or ``None`` to accept sends.
+        :type send_error: Ed2kError | None
+        """
+        self.peer = peer
+        self.limits = DEFAULT_LIMITS
+        self.closed = False
+        self._packets = list(packets)
+        self._send_error = send_error
+
+    async def read_packet(self, *, limit: int | None = None) -> Packet:
+        """Return the next packet, or fail once none is left.
+
+        :param limit: the largest accepted packet length, unused.
+        :type limit: int | None
+        :returns: the packet.
+        :rtype: Packet
+        :raises ConnectionFailedError: once every packet was read.
+        """
+        del limit
+        if self._packets:
+            return self._packets.pop(0)
+        err_msg = 'closed'
+        raise ConnectionFailedError(err_msg)
+
+    async def send(self, *, protocol: int, opcode: int, payload: bytes = b'') -> None:
+        """Accept a packet and drop it, or fail as the stream was told to.
+
+        :param protocol: the namespace byte.
+        :type protocol: int
+        :param opcode: the operation code.
+        :type opcode: int
+        :param payload: the body.
+        :type payload: bytes
+        :raises Ed2kError: the send error the stream was given.
+        """
+        del protocol, opcode, payload
+        if self._send_error is not None:
+            raise self._send_error
+
+    async def __aenter__(self) -> Self:
+        """Enter the context.
+
+        :returns: the stream itself.
+        :rtype: Self
+        """
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
+    ) -> None:
+        """Record that the connection was closed.
+
+        :param exc_type: the exception type, if any.
+        :type exc_type: type[BaseException] | None
+        :param exc: the exception, if any.
+        :type exc: BaseException | None
+        :param traceback: the traceback, if any.
+        :type traceback: TracebackType | None
+        """
+        del exc_type, exc, traceback
+        self.closed = True
