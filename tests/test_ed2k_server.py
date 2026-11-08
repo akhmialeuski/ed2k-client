@@ -229,6 +229,43 @@ class TestConnect:
 
         assert [session.server for session in status.servers] == [second.entry]
 
+    async def test_remembered_servers_survive_a_connect_that_no_server_answers(self, tmp_path: Path) -> None:
+        """A connect in which every login fails keeps the memory, since the client's own network is the likely cause.
+
+        Forgetting every server after one run without network would send the next run back to the order by users.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        unreachable = tuple(ServerEntry(host=LOOPBACK, port=free_port()) for _ in range(2))
+        config = make_config(tmp_path, LEECHER, servers=unreachable)
+        config.state_dir.mkdir(parents=True)
+        memory = ServerMemory.load(config.state_dir)
+        for server in unreachable:
+            memory.remember(server)
+
+        async with Client(config) as client:
+            with pytest.raises(ConnectionFailedError):
+                await client.connect()
+
+        assert ServerMemory.load(config.state_dir).addresses == memory.addresses
+
+    async def test_refused_server_is_forgotten_once_another_accepts(self, tmp_path: Path) -> None:
+        """A remembered server that refuses while another accepts the login is dropped from the memory.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        refusing = ServerEntry(host=LOOPBACK, port=free_port())
+        async with FakeServer() as server:
+            config = make_config(tmp_path, LEECHER, servers=(refusing, server.entry))
+            config.state_dir.mkdir(parents=True)
+            ServerMemory.load(config.state_dir).remember(refusing)
+            async with Client(config) as client:
+                await client.connect()
+
+        assert ServerMemory.load(config.state_dir).addresses == [server.entry.address]
+
 
 class TestSearch:
     """Tests of :meth:`Client.search` through a server."""

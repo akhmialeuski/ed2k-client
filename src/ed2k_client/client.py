@@ -341,7 +341,8 @@ class Client:
 
         The candidates are the configured servers, the local ``server.met`` or the downloaded one, with the servers
         that accepted a login before tried first and the rest by users. Logins run in parallel, as many as sessions
-        are still missing, and a refused one makes room for the next candidate.
+        are still missing, and a refused one makes room for the next candidate. The refused servers are forgotten only
+        when some server accepted, so a run without network leaves the remembered order alone.
 
         :param server: a specific server, or ``None`` to try the list.
         :type server: ServerEntry | None
@@ -362,15 +363,22 @@ class Client:
         if self.config.tcp_port == ANY_PORT:
             await self._listen()
 
+        refused: list[ServerEntry] = []
         while wanted > 0 and pending:
             batch, pending = pending[:wanted], pending[wanted:]
-            sessions = [session for session in await asyncio.gather(*map(self._login, batch)) if session is not None]
+            outcomes = await asyncio.gather(*map(self._login, batch))
+            sessions = [session for session in outcomes if session is not None]
+            refused.extend(entry for entry, session in zip(batch, outcomes, strict=True) if session is None)
             self._servers.extend(sessions)
             wanted -= len(sessions)
 
         if not self._live_servers:
             err_msg = 'no server accepted the login'
             raise ConnectionFailedError(err_msg)
+
+        # Forgotten only once some server answered, because a run in which none does points at this client's network
+        for entry in refused:
+            self._server_memory.forget(entry)
         return self.status
 
     async def _server_candidates(self) -> list[ServerEntry]:
@@ -406,7 +414,7 @@ class Client:
         return server_list.by_users()
 
     async def _login(self, entry: ServerEntry) -> ServerSession | None:
-        """Log in to one server, remember it when it accepts and forget it when it refuses.
+        """Log in to one server and remember it when it accepts.
 
         :param entry: the server.
         :type entry: ServerEntry
@@ -425,7 +433,6 @@ class Client:
             )
         except ConnectionFailedError as error:
             logger.warning('Server %s refused: %s', entry.address, error)
-            self._server_memory.forget(entry)
             return None
 
         self._server_memory.remember(entry)
