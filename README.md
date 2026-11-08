@@ -125,8 +125,10 @@ A download keeps a part file in `<download_dir>/.incoming` with its progress in 
 the owner only. Workers dial the sources the server and Kad report, request up to three 180 KiB blocks at a time,
 accept raw or zlib-compressed blocks, and verify every 9,728,000-byte part against the hashset. A peer that queues
 the client is asked again after 21.7 minutes at the earliest, as eMule's `FILEREASKTIME`, because eMule bans clients
-that ask more often than every ten minutes. A part that fails its hash convicts its peer only when that peer alone
-delivered it. A part with several contributors is fetched again from one peer, so the next failure is unambiguous.
+that ask more often than every ten minutes. A peer that ends an upload session, as aMule and eMule do after 10 MiB or
+an hour while others wait, has queued the client again and is asked again the same way, never counted as a failure.
+A part that fails its hash convicts its peer only when that peer alone delivered it. A part with several contributors
+is fetched again from one peer, so the next failure is unambiguous.
 
 ## Defences
 

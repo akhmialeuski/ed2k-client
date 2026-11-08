@@ -102,15 +102,15 @@ class FileStatus:
 
 
 class QueuedError(ConnectionFailedError):
-    """The peer put this client in its upload queue instead of granting a slot.
+    """The peer put this client in its upload queue instead of granting a slot, or again after ending one.
 
-    :ivar rank: the position the peer reported.
+    :ivar rank: the position the peer reported, 0 when it reported none.
     """
 
     def __init__(self, rank: int) -> None:
         """Record the queue rank.
 
-        :param rank: the position the peer reported.
+        :param rank: the position the peer reported, 0 when it reported none.
         :type rank: int
         """
         super().__init__(f'queued at rank {rank}')
@@ -464,7 +464,8 @@ class PeerConnection:
         :returns: ``(block, start offset, data)`` for every piece received.
         :rtype: AsyncIterator[tuple[Block, int, bytes]]
         :raises ProtocolError: on data outside the requested blocks.
-        :raises ConnectionFailedError: when the peer ends the transfer.
+        :raises QueuedError: when the peer ends the upload slot and puts this client back in its queue.
+        :raises ConnectionFailedError: when the connection is lost.
         """
         protocol, opcode, payload = encode_part_request(file_hash=file_hash, blocks=blocks, large=large)
         await self.stream.send(protocol=protocol, opcode=opcode, payload=payload)
@@ -472,10 +473,13 @@ class PeerConnection:
         inflaters: dict[Block, BlockInflater] = {}
 
         while any(remaining.values()):
+            # aMule ends every session after 10 MiB or an hour while others wait, and queues the client again, so the
+            # end of a slot is a place in the queue rather than a failure of the source:
+            # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadQueue.cpp#L599
+            # https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/UploadClient.cpp#L495
             packet = await self._next(DATA_OPCODES | SLOT_END_OPCODES)
             if (packet.protocol, packet.opcode) in SLOT_END_OPCODES:
-                err_msg = f'{self.stream.peer} ended the upload slot'
-                raise ConnectionFailedError(err_msg)
+                raise QueuedError(0)
 
             reader = packet.reader()
             if Ed2kHash(reader.hash16()) != file_hash:
