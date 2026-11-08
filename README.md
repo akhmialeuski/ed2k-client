@@ -13,16 +13,22 @@ for the extensions `pdf` and `djvu` and the `--documents-only` policy still serv
 ## Installation
 
 The package needs Python 3.14 and one runtime dependency, [pycryptodome](https://www.pycryptodome.org/), which
-provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4. Until the first
-release reaches PyPI, the `ed2k-client` command or the library installs from this repository:
+provides MD4 and RC4. OpenSSL 3 no longer offers MD4 through `hashlib`, and eD2k hashes are MD4. The
+`ed2k-client` command installs as a uv tool, and the library installs into a project with pip:
+
+```bash
+uv tool install ed2k-client
+pip install ed2k-client
+```
+
+The unreleased state of `main` installs the same way from the repository:
 
 ```bash
 uv tool install git+https://github.com/akhmialeuski/ed2k-client
-pip install git+https://github.com/akhmialeuski/ed2k-client
 ```
 
 A checkout for development gets the tools of the `dev` dependency group, which never reach the published package,
-and the pre-commit hook that runs the gate described under [Tests](#tests). The examples below use `uv run` from
+and the pre-commit hook that runs the gate described under Tests below. The examples below use `uv run` from
 such a checkout, and an installed package runs the same commands without it:
 
 ```bash
@@ -105,8 +111,9 @@ config = ClientConfig.from_toml(Path('my-settings.toml'))
 
 Each group refuses a value that cannot work when it is built. Values the protocol fixes, such as the part size,
 the obfuscation magic numbers and the Kad search tolerance, stay constants, because changing them would break every
-exchange with other clients. [config.example.toml](config.example.toml) lists every setting with its default and
-description, and `scripts/render_config_example.py` regenerates it from the code.
+exchange with other clients.
+[config.example.toml](https://github.com/akhmialeuski/ed2k-client/blob/main/config.example.toml) lists every setting
+with its default and description, and `scripts/render_config_example.py` regenerates it from the code.
 
 ## Command line
 
@@ -121,7 +128,9 @@ uv run ed2k-client --config config.example.toml search "springer 2025" --server-
 ```
 
 `scripts/ed2k.py` runs the same command line from a checkout with `uv run scripts/ed2k.py ...`. `--config` reads a
-TOML file shaped like [config.example.toml](config.example.toml), and a flag wins over the file. `--server
+TOML file shaped like
+[config.example.toml](https://github.com/akhmialeuski/ed2k-client/blob/main/config.example.toml), and a flag wins over
+the file. `--server
 ed2k://|server|ip|port|/` picks a single server, `--server-met` reads the server list from a file that `servers
 --save` wrote, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use any free port, `--port 0`
 takes any free TCP port before the login and announces the port it got, and `--connect-timeout` and `--read-timeout`
@@ -223,13 +232,16 @@ uv run pre-commit run --all-files
 ```
 
 GitHub Actions runs the same gate and the integration suite on every push to `main` and every pull request, on
-Linux with Python 3.14, as [ci.yml](.github/workflows/ci.yml) describes. The network suite runs only by hand.
+Linux with Python 3.14, as
+[ci.yml](https://github.com/akhmialeuski/ed2k-client/blob/main/.github/workflows/ci.yml) describes. The network
+suite runs only by hand.
 
 ## Releasing
 
 A release goes out from `main` in three steps:
 
-1. A pull request moves the entries under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) into a section for the new
+1. A pull request moves the entries under `Unreleased` in
+   [CHANGELOG.md](https://github.com/akhmialeuski/ed2k-client/blob/main/CHANGELOG.md) into a section for the new
    version and sets `version` in `pyproject.toml` to the same number.
 2. After that pull request is merged, a tag naming that version is pushed on `main`, here for 0.1.0:
 
@@ -238,9 +250,10 @@ A release goes out from `main` in three steps:
    git push origin v0.1.0
    ```
 
-3. [release.yml](.github/workflows/release.yml) checks that the tag matches the project version, builds the
-   package, publishes it to TestPyPI and installs it back from there. It then waits for the owner to approve the
-   `pypi` environment in the Actions tab, publishes the same files to PyPI and installs them from PyPI.
+3. [release.yml](https://github.com/akhmialeuski/ed2k-client/blob/main/.github/workflows/release.yml) checks that
+   the tag matches the project version, builds the package, publishes it to TestPyPI and installs it back from
+   there. It then waits for the owner to approve the `pypi` environment in the Actions tab, publishes the same files
+   to PyPI and installs them from PyPI.
 
 Both indexes trust the workflow through trusted publishing, so the repository holds no API token. PyPI never
 accepts the same version twice, so a broken release is fixed by the next version.
@@ -256,5 +269,5 @@ login and still ignore searches. On 2026-11-06 eMule Sunrise did so while ed2k-r
 ## License and lawful use
 
 ed2k-client is free software under the GNU General Public License, version 3 or later, whose text is in
-[LICENSE](LICENSE). The client downloads and shares whatever the network offers. Before you fetch or share a file,
-make sure you have the right to do so where you live.
+[LICENSE](https://github.com/akhmialeuski/ed2k-client/blob/main/LICENSE). The client downloads and shares whatever
+the network offers. Before you fetch or share a file, make sure you have the right to do so where you live.
