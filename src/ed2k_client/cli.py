@@ -38,6 +38,7 @@ FLAG: str = 'store_true'
 USAGE_ERROR: int = 2
 ERROR_PREFIX: str = 'error: '
 LINKS_ARGUMENT: str = 'links'
+TEXT_ARGUMENT: str = 'text'
 PATH_ARGUMENT: str = 'path'
 PATHS_ARGUMENT: str = 'paths'
 
@@ -63,7 +64,37 @@ def build_config(arguments: argparse.Namespace) -> ClientConfig:
     config = ClientConfig.from_toml(Path(arguments.config)) if arguments.config else ClientConfig()
 
     # The network flags exist only on the commands that talk to the network
-    return _apply_network_flags(config, arguments) if 'state_dir' in arguments else config
+    config = _apply_network_flags(config, arguments) if 'state_dir' in arguments else config
+    return _apply_command_flags(config, arguments)
+
+
+def _apply_command_flags(config: ClientConfig, arguments: argparse.Namespace) -> ClientConfig:
+    """Override the settings with the flags of the download and share commands.
+
+    The settings refuse an impossible value when they are built, so building them here lets :func:`main` report it
+    before any client starts.
+
+    :param config: the settings from the defaults, the configuration file and the network flags.
+    :type config: ClientConfig
+    :param arguments: the parsed command line.
+    :type arguments: argparse.Namespace
+    :returns: the settings.
+    :rtype: ClientConfig
+    """
+    download = config.download
+    if getattr(arguments, 'any_content', False):
+        download = replace(download, content_policy=ContentPolicy.ANY)
+    if getattr(arguments, 'safe_content', False):
+        download = replace(download, content_policy=ContentPolicy.SAFE)
+    if (hours := getattr(arguments, 'deadline_hours', None)) is not None:
+        download = replace(download, deadline=hours * SECONDS_PER_HOUR)
+    if (peers := getattr(arguments, 'max_peers', None)) is not None:
+        download = replace(download, max_peers=peers)
+
+    share = config.share
+    if (slots := getattr(arguments, 'upload_slots', None)) is not None:
+        share = replace(share, upload_slots=slots)
+    return replace(config, download=download, share=share)
 
 
 def _apply_network_flags(config: ClientConfig, arguments: argparse.Namespace) -> ClientConfig:
@@ -128,14 +159,12 @@ def _row(result: SearchResult) -> dict[str, object]:
 async def _search(arguments: argparse.Namespace) -> None:
     """Run the ``search`` command and print the results as a table or JSON.
 
-    :param arguments: the parsed command line.
+    :param arguments: the parsed command line, whose query :func:`main` has already built.
     :type arguments: argparse.Namespace
     """
     async with Client(build_config(arguments)) as client:
         await _connect(client, arguments)
-        file_type = FileType.DOCUMENT if arguments.documents else None
-        query = SearchQuery(text=arguments.text, extensions=tuple(arguments.ext), file_type=file_type)
-        results = await client.search(query)
+        results = await client.search(arguments.query)
 
     # The table goes to stdout and the connection status to stderr, so --json output can be piped as it is
     if arguments.json:
@@ -173,20 +202,8 @@ async def _download(arguments: argparse.Namespace) -> None:
     :param arguments: the parsed command line, whose links :func:`main` has already parsed.
     :type arguments: argparse.Namespace
     """
-    config = build_config(arguments)
-    download = config.download
-    if arguments.any_content:
-        download = replace(download, content_policy=ContentPolicy.ANY)
-    if arguments.safe_content:
-        download = replace(download, content_policy=ContentPolicy.SAFE)
-    if arguments.deadline_hours is not None:
-        download = replace(download, deadline=arguments.deadline_hours * SECONDS_PER_HOUR)
-    if arguments.max_peers is not None:
-        download = replace(download, max_peers=arguments.max_peers)
-    config = replace(config, download=download)
-
     printer = ProgressPrinter()
-    async with Client(config) as client:
+    async with Client(build_config(arguments)) as client:
         await _connect(client, arguments)
 
         # return_exceptions keeps one failed link from cancelling the downloads of the others
@@ -208,11 +225,7 @@ async def _share(arguments: argparse.Namespace) -> None:
     :param arguments: the parsed command line.
     :type arguments: argparse.Namespace
     """
-    config = build_config(arguments)
-    if arguments.upload_slots is not None:
-        config = replace(config, share=replace(config.share, upload_slots=arguments.upload_slots))
-
-    async with Client(config) as client:
+    async with Client(build_config(arguments)) as client:
         await _connect(client, arguments)
         for shared in await client.share(Path(arguments.path)):
             print(f'sharing {FileLink(name=shared.name, size=shared.size, file_hash=shared.file_hash)}')
@@ -269,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     network.add_argument('--read-timeout', type=float, help='seconds of silence before a peer connection drops')
 
     search = commands.add_parser('search', parents=[network], help='search by words and extension')
-    search.add_argument('text')
+    search.add_argument(TEXT_ARGUMENT)
     search.add_argument('--ext', nargs='*', default=['pdf', 'djvu'], help='extensions, empty for any')
     search.add_argument('--documents', action=FLAG, help='restrict to the server type Doc')
     search.add_argument('--json', action=FLAG)
@@ -322,6 +335,21 @@ def _check_local_paths(arguments: argparse.Namespace, config: ClientConfig) -> N
             raise FileNotFoundError(err_msg)
 
 
+def _parse_inputs(arguments: argparse.Namespace) -> None:
+    """Replace the links by their parsed form and build the search query from its words and flags.
+
+    :param arguments: the parsed command line, which gains the parsed values.
+    :type arguments: argparse.Namespace
+    :raises ProtocolError: on a malformed link.
+    :raises ValueError: on a query without words.
+    """
+    if LINKS_ARGUMENT in arguments:
+        arguments.links = [FileLink.parse(link) for link in arguments.links]
+    if TEXT_ARGUMENT in arguments:
+        file_type = FileType.DOCUMENT if arguments.documents else None
+        arguments.query = SearchQuery(text=arguments.text, extensions=tuple(arguments.ext), file_type=file_type)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line.
 
@@ -333,12 +361,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
 
     # Every input is checked here, before any client, identity or connection exists: the configuration file, the
-    # flags, the local paths and the links, which are replaced by their parsed form. Only a TOML error lacks the file
-    # in its message
+    # flags, the local paths, the links and the search query, the last two replaced by their parsed form. Only a TOML
+    # error lacks the file in its message
     try:
         _check_local_paths(arguments, build_config(arguments))
-        if LINKS_ARGUMENT in arguments:
-            arguments.links = [FileLink.parse(link) for link in arguments.links]
+        _parse_inputs(arguments)
     except tomllib.TOMLDecodeError as error:
         print(f'{ERROR_PREFIX}{arguments.config}: {error}', file=sys.stderr)
         return USAGE_ERROR

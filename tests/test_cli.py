@@ -17,6 +17,9 @@ SEARCH = ['search', 'kademlia']
 MISSING = '/missing/book.pdf'
 NO_SUCH_PATH = 'error: no such file or directory: '
 MISSING_NAME = 'missing.dat'
+GOOD_LINK = 'ed2k://|file|a.pdf|5|E737E3459E12C22118C48306FAE1D8EB|/'
+DOWNLOAD = 'download'
+SHARE = 'share'
 
 
 @pytest.mark.usefixtures('fs')
@@ -52,17 +55,48 @@ class TestMain:
         :param fs: the in-memory file system, which must stay without a state directory.
         :type fs: FakeFilesystem
         """
-        good = 'ed2k://|file|a.pdf|5|E737E3459E12C22118C48306FAE1D8EB|/'
         bad = 'ed2k://|file|b.pdf|0|E737E3459E12C22118C48306FAE1D8EB|/'
 
-        code = main(['download', good, bad, *OFFLINE])
+        code = main([DOWNLOAD, GOOD_LINK, bad, *OFFLINE])
 
         assert code == USAGE_ERROR
         assert not fs.exists(DEFAULT_STATE_DIR)
 
     @pytest.mark.parametrize(
+        ('command', 'message'),
+        [
+            ([DOWNLOAD, GOOD_LINK, '--max-peers', '0'], 'DownloadSettings.max_peers must be positive, not 0'),
+            ([DOWNLOAD, GOOD_LINK, '--deadline-hours', '0'], 'DownloadSettings.deadline must be positive, not 0.0'),
+            ([SHARE, '/', '--upload-slots', '0'], 'ShareSettings.upload_slots must be positive, not 0'),
+            (['search', '..'], 'a search needs at least one word'),
+        ],
+        ids=['no peers', 'no time', 'no upload slots', 'no words'],
+    )
+    def test_bad_command_value_is_a_usage_error(
+        self, fs: FakeFilesystem, capsys: pytest.CaptureFixture[str], command: list[str], message: str
+    ) -> None:
+        """A flag value of one command, or a query without words, is a usage error before any client starts.
+
+        These values are checked by the settings and the query when they are built, so a command that builds them
+        only once its client runs ends in a traceback after the identity and the lock already exist.
+
+        :param fs: the in-memory file system, which must stay without a state directory.
+        :type fs: FakeFilesystem
+        :param capsys: the captured output.
+        :type capsys: pytest.CaptureFixture[str]
+        :param command: the command line with the bad value.
+        :type command: list[str]
+        :param message: the error the command must report.
+        :type message: str
+        """
+        code = main([*command, *OFFLINE])
+
+        assert (code, capsys.readouterr().err) == (USAGE_ERROR, f'error: {message}\n')
+        assert not fs.exists(DEFAULT_STATE_DIR)
+
+    @pytest.mark.parametrize(
         'arguments',
-        [['hash', MISSING], ['share', MISSING, '--seconds', '0', '--port', '0', *OFFLINE]],
+        [['hash', MISSING], [SHARE, MISSING, '--seconds', '0', '--port', '0', *OFFLINE]],
         ids=['hashed file', 'shared path'],
     )
     def test_missing_path_argument_is_a_usage_error(
