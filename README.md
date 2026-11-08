@@ -102,7 +102,8 @@ uv run ed2k-client servers
 `scripts/ed2k.py` runs the same command line from a checkout with `uv run scripts/ed2k.py ...`. `--config` reads a
 TOML file shaped like [config.example.toml](config.example.toml), and a flag wins over the file. `--server
 ed2k://|server|ip|port|/` picks a server, `--no-kad` and `--no-server` skip a network, `--udp-port 0` lets Kad use
-any free port, and `--connect-timeout` and `--read-timeout` set the connection timeouts. `download` accepts several
+any free port, `--port 0` takes any free TCP port before the login and announces the port it got, and
+`--connect-timeout` and `--read-timeout` set the connection timeouts. `download` accepts several
 links and fetches them concurrently with one identity, `--safe-content` and `--any-content` widen what leaves
 quarantine, `--deadline-hours` and `--max-peers` bound each download, and
 `share` takes `--upload-slots`.

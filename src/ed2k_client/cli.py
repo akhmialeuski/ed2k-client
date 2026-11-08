@@ -274,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     network.add_argument('--download-dir', help='finished downloads')
     network.add_argument('--server', help='ed2k://|server|ip|port|/ to use instead of the list')
     network.add_argument('--nodes-dat', help='local nodes.dat instead of the download')
-    network.add_argument('--port', type=int, help='TCP port to announce and to listen on while sharing')
+    network.add_argument('--port', type=int, help='TCP port to announce and to listen on, 0 for any free port')
     network.add_argument('--udp-port', type=int, help='local Kad UDP port, 0 for any free port')
     network.add_argument('--no-server', action=FLAG, help='skip the eD2k server')
     network.add_argument('--no-kad', action=FLAG, help='skip Kad')

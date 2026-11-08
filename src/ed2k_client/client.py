@@ -8,7 +8,8 @@ Typical use::
         finished = await client.download(results[0])
 
 The client owns every socket it opens and closes them on leaving the ``async with`` block. Sharing is off until
-:meth:`Client.share` is called, and the listener for incoming connections runs only while something is shared.
+:meth:`Client.share` is called. The listener for incoming connections starts with the first share, or with the login
+when the configured TCP port is 0, so that the server learns the port the listener got.
 """
 
 import asyncio
@@ -66,6 +67,7 @@ DEFAULT_STATE_DIR: Path = Path.home() / '.local' / 'state' / 'ed2k-client'
 DEFAULT_DOWNLOAD_DIR: Path = Path.home() / 'Downloads' / 'ed2k'
 QUARANTINE_DIR: str = '.incoming'
 LOCK_FILE: str = 'client.lock'
+ANY_PORT: int = 0
 DEFAULT_NICKNAME: str = 'ed2k-client'
 SERVERS_KEY: str = 'servers'
 DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({'pdf', 'djvu', 'djv'})
@@ -79,7 +81,8 @@ class ClientConfig:
     :ivar state_dir: identity, hash cache and other private state.
     :ivar download_dir: finished files; unfinished ones stay in its ``.incoming`` quarantine.
     :ivar nickname: the user name shown to servers and peers.
-    :ivar tcp_port: the port announced to servers and used for incoming connections while sharing.
+    :ivar tcp_port: the port announced to servers and used for incoming connections while sharing, 0 for any free
+        port, which the listener then takes before the login so that the port it got is the one announced.
     :ivar listen_host: the IPv4 address the listener binds while sharing.
     :ivar udp_port: the local Kad port.
     :ivar servers: servers to use; empty means the list at ``server_met_url``.
@@ -278,6 +281,11 @@ class Client:
         return int(self._listener.sockets[0].getsockname()[1])
 
     @property
+    def _announced_port(self) -> int:
+        """The TCP port the server and peers are told: the listener's port once it runs, the configured one before."""
+        return self.listening_port or self.config.tcp_port
+
+    @property
     def _local(self) -> LocalPeer:
         """Describe this client for hellos with the current server and ID.
 
@@ -290,7 +298,7 @@ class Client:
         return LocalPeer(
             identity=self.identity,
             client_id=client_id,
-            tcp_port=self.config.tcp_port,
+            tcp_port=self._announced_port,
             nickname=self.config.nickname,
             server=server,
         )
@@ -318,6 +326,10 @@ class Client:
             )
             candidates = server_list.by_users()
 
+        # The server dials the announced port to tell a High ID from a Low ID, so a free port is taken before the login
+        if self.config.tcp_port == ANY_PORT:
+            await self._listen()
+
         for entry in candidates:
             if not self.policy.permits(entry.host, entry.port):
                 continue
@@ -325,7 +337,7 @@ class Client:
                 session = await ServerSession.login(
                     entry=entry,
                     details=LoginDetails(
-                        identity=self.identity, tcp_port=self.config.tcp_port, nickname=self.config.nickname
+                        identity=self.identity, tcp_port=self._announced_port, nickname=self.config.nickname
                     ),
                     on_callback=self._on_callback,
                     timeouts=self.config.timeouts,
@@ -503,13 +515,7 @@ class Client:
         """
         # Hashing a library of books takes minutes, so it runs in a thread
         added = await asyncio.to_thread(self.library.add, path)
-
-        if self._listener is None:
-            # eD2k addresses are IPv4 only, and binding all families would give each its own port when the port is 0
-            self._listener = await asyncio.start_server(
-                self._on_incoming, host=self.config.listen_host, port=self.config.tcp_port
-            )
-            self._exits.push_async_callback(self._close_listener)
+        await self._listen()
 
         if self._server is not None:
             await self._server.offer_files(
@@ -519,6 +525,17 @@ class Client:
                 ]
             )
         return added
+
+    async def _listen(self) -> None:
+        """Start accepting peers, unless the listener already runs."""
+        if self._listener is not None:
+            return
+
+        # eD2k addresses are IPv4 only, and binding all families would give each its own port when the port is 0
+        self._listener = await asyncio.start_server(
+            self._on_incoming, host=self.config.listen_host, port=self.config.tcp_port
+        )
+        self._exits.push_async_callback(self._close_listener)
 
     async def _close_listener(self) -> None:
         """Stop accepting peers and cut off the ones being served."""

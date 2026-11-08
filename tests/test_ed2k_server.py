@@ -121,6 +121,23 @@ class TestConnect:
             assert status.server == server.entry
             assert client.status.client_id == next(iter(server.sessions))
 
+    async def test_port_zero_announces_the_bound_port(self, tmp_path: Path) -> None:
+        """A client configured with port 0 tells the server the port its listener got, never 0.
+
+        The server dials the announced port to tell a High ID from a Low ID and lists it as the port of every file the
+        client offers, so port 0 makes the client unreachable whatever the network allows.
+
+        :param tmp_path: the directory the clients keep their files in.
+        :type tmp_path: Path
+        """
+        async with FakeServer() as server, Client(make_config(tmp_path, SEEDER)) as client:
+            await client.connect(server.entry)
+            listening = client.listening_port
+            announced = next(iter(server.sessions.values())).port
+
+        assert listening is not None
+        assert announced == listening
+
     async def test_welcome_message_is_recorded(self, tmp_path: Path) -> None:
         """Server messages are kept for the caller to show.
 
