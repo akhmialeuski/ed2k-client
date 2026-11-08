@@ -345,9 +345,11 @@ class PeerConnection:
         :raises ProtocolError: when the peer floods unexpected packets.
         """
         # A peer may send packets this client has no use for, so a few unknown packets are normal and only a long
-        # run of them is a flood
+        # run of them is a flood. A data packet is bounded by the protocol, while a hashset answer grows by 16 bytes a
+        # part and is bounded by the configured cap of control packets
+        limit = max(MAX_DATA_PACKET, self.stream.limits.control_packet)
         for _ in range(self.stream.limits.ignored_packets):
-            packet = await self.stream.read_packet(limit=MAX_DATA_PACKET)
+            packet = await self.stream.read_packet(limit=limit)
             if (packet.protocol, packet.opcode) in wanted:
                 return packet
             logger.debug('Ignoring 0x%02X/0x%02X from %s', packet.protocol, packet.opcode, self.stream.peer)
