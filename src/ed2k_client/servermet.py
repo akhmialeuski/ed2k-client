@@ -11,12 +11,12 @@ accepted a login, so the next connection tries them first.
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
 from ed2k_client.errors import ProtocolError
 from ed2k_client.fetch import fetch_https
+from ed2k_client.files import write_private
 from ed2k_client.settings import DEFAULT_LIMITS, DEFAULT_TIMEOUTS
 from ed2k_client.tags import int_value, read_tags, str_value, tag_map
 from ed2k_client.wire import Reader
@@ -45,24 +45,6 @@ BOM: str = '\ufeff'
 
 MEMORY_FILE: str = 'servers.json'
 ENCODING: str = 'utf-8'
-FILE_MODE: int = 0o600
-TEMPORARY_SUFFIX: str = '.tmp'
-
-
-def _write_private(path: Path, data: bytes) -> None:
-    """Write a file readable by its owner only, replacing it atomically.
-
-    :param path: the file.
-    :type path: Path
-    :param data: the content.
-    :type data: bytes
-    """
-    # Written beside the target and renamed over it, so a crash leaves either the old or the new content
-    temporary = path.with_name(path.name + TEMPORARY_SUFFIX)
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
-    with os.fdopen(descriptor, 'wb') as stream:
-        stream.write(data)
-    temporary.replace(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +164,7 @@ class ServerList:
 
         # Saved only once it parsed, so a broken download never replaces a good copy
         if save_to is not None:
-            _write_private(save_to, body)
+            write_private(save_to, body)
         return server_list
 
     def by_users(self) -> list[ServerEntry]:
@@ -260,6 +242,6 @@ class ServerMemory:
         """Write the memory, readable by its owner only, and only warn when it cannot be written."""
         # The memory only orders the next run, so a full disk costs that order rather than the current login
         try:
-            _write_private(self.path, json.dumps(self.addresses).encode(ENCODING))
+            write_private(self.path, json.dumps(self.addresses).encode(ENCODING))
         except OSError as error:
             logger.warning('Cannot save the server memory to %s: %s', self.path, error)

@@ -8,11 +8,11 @@ Hashes are cached in the state directory, because hashing a library of books tak
 
 import json
 import logging
-import os
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
 from ed2k_client.errors import SecurityError
+from ed2k_client.files import write_private
 from ed2k_client.hashing import Ed2kHash, hash_file
 from ed2k_client.settings import DEFAULT_IO
 
@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 CACHE_FILE: str = 'known_files.json'
 ENCODING: str = 'utf-8'
-FILE_MODE: int = 0o600
 READ_BINARY: Literal['rb'] = 'rb'
 
 
@@ -155,12 +154,8 @@ class SharedLibrary:
 
     def _save_cache(self) -> None:
         """Write the hash cache atomically with owner-only permissions."""
-        # Renamed over the old cache, so a crash never leaves a half-written file
-        temporary = self._cache_path.with_suffix('.tmp')
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
-        with os.fdopen(descriptor, 'w', encoding=ENCODING) as stream:
-            json.dump({path: asdict(record) for path, record in self._cache.items()}, stream)
-        temporary.replace(self._cache_path)
+        cache = {path: asdict(record) for path, record in self._cache.items()}
+        write_private(self._cache_path, json.dumps(cache).encode(ENCODING))
 
     def read(self, *, shared: SharedFile, start: int, end: int) -> bytes:
         """Read a range of a shared file after checking it was not changed on disk.

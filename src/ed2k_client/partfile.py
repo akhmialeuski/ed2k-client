@@ -16,6 +16,7 @@ from Crypto.Hash import MD4
 
 from ed2k_client.constants import BLOCK_SIZE, PART_SIZE
 from ed2k_client.errors import HashMismatchError, ProtocolError
+from ed2k_client.files import FILE_MODE, write_private
 from ed2k_client.hashing import data_part_count, expected_part_hash, hash_from_parts, hashset_length
 from ed2k_client.settings import DEFAULT_IO
 
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
 
     from ed2k_client.hashing import Ed2kHash
 
-FILE_MODE: int = 0o600
 DIRECTORY_MODE: int = 0o700
 METADATA_SUFFIX: str = '.part.json'
 DATA_SUFFIX: str = '.part'
@@ -329,13 +329,7 @@ class PartFile:
             part_hashes=[item.hex() for item in self.part_hashes],
             verified_parts=sorted(self.verified_parts),
         )
-
-        # Written beside the target and renamed over it, so a crash leaves either the old or the new progress
-        temporary = self.metadata_path.with_suffix('.tmp')
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
-        with os.fdopen(descriptor, 'w', encoding=ENCODING) as stream:
-            json.dump(asdict(state), stream)
-        temporary.replace(self.metadata_path)
+        write_private(self.metadata_path, json.dumps(asdict(state)).encode(ENCODING))
 
     def read(self, *, start: int, length: int) -> bytes:
         """Read bytes back.
