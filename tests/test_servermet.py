@@ -1,5 +1,6 @@
 """Unit tests of the server lists: saving and reading a ``server.met`` and remembering servers that accepted a login."""
 
+import logging
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,8 @@ from tests.helpers import server_met
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
 
+    from pyfakefs.fake_filesystem import FakeFilesystem
+
 pytestmark = pytest.mark.usefixtures('fs')
 
 FETCH = 'ed2k_client.servermet.fetch_https'
@@ -23,6 +26,7 @@ BUSY = ServerEntry(host='203.0.113.10', port=4661, name='busy', users=900)
 QUIET = ServerEntry(host='203.0.113.20', port=4242, name='quiet', users=10)
 SPARE = ServerEntry(host='203.0.113.30', port=5000, name='spare', users=50)
 PRIVATE_FILE = 0o600
+FULL_DISK_BYTES = 1
 
 
 class TestServerListDownload:
@@ -90,3 +94,23 @@ class TestServerMemory:
         memory.remember(SPARE)
 
         assert memory.prefer([BUSY, QUIET]) == [BUSY, QUIET]
+
+    def test_failed_write_is_logged_and_the_order_kept_in_memory(
+        self, fs: FakeFilesystem, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A memory that cannot be saved still orders this run and only warns, since it is a hint for the next one.
+
+        :param fs: the in-memory file system, made too small for the memory file.
+        :type fs: FakeFilesystem
+        :param caplog: the captured log records.
+        :type caplog: pytest.LogCaptureFixture
+        """
+        STATE_DIR.mkdir()
+        fs.set_disk_usage(total_size=FULL_DISK_BYTES)
+        memory = ServerMemory.load(STATE_DIR)
+
+        with caplog.at_level(logging.WARNING):
+            memory.remember(SPARE)
+
+        assert memory.prefer([BUSY, SPARE]) == [SPARE, BUSY]
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]

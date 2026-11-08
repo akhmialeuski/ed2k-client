@@ -10,6 +10,7 @@ accepted a login, so the next connection tries them first.
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ed2k_client.settings import Limits
+
+logger = logging.getLogger(__name__)
 
 # aMule accepts both header bytes when it reads a server.met: https://github.com/amule-project/amule/blob/6a1105634d81242a581a0f36a7e00379b12a83f3/src/ServerList.cpp#L125
 MET_HEADERS: frozenset[int] = frozenset({0x0E, 0xE0})
@@ -254,5 +257,9 @@ class ServerMemory:
             self._save()
 
     def _save(self) -> None:
-        """Write the memory, readable by its owner only."""
-        _write_private(self.path, json.dumps(self.addresses).encode(ENCODING))
+        """Write the memory, readable by its owner only, and only warn when it cannot be written."""
+        # The memory only orders the next run, so a full disk costs that order rather than the current login
+        try:
+            _write_private(self.path, json.dumps(self.addresses).encode(ENCODING))
+        except OSError as error:
+            logger.warning('Cannot save the server memory to %s: %s', self.path, error)
