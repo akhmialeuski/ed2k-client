@@ -222,6 +222,9 @@ and Kad search with sources from each network. The pre-commit gate runs ruff, ty
 uv run pre-commit run --all-files
 ```
 
+GitHub Actions runs the same gate and the integration suite on every push to `main` and every pull request, on
+Linux with Python 3.14, as [ci.yml](.github/workflows/ci.yml) describes. The network suite runs only by hand.
+
 ## Limitations
 
 The client is a Low ID client when its TCP port is not reachable from the internet. It can then download only from
