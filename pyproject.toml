@@ -4,12 +4,31 @@ version = "0.1.0"
 description = "Python client for the eDonkey2000 (eD2k) and Kad networks: connect, search, download and share."
 readme = "README.md"
 requires-python = ">=3.14"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Anatol Khmialeuski" }]
+keywords = ["ed2k", "edonkey2000", "emule", "amule", "kad", "kademlia", "p2p", "file-sharing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: File Sharing",
+]
 # Versions read from PyPI on 2026-11-06. Tools are pinned with ==, libraries take a >= floor,
 # and uv.lock fixes what gets installed.
 dependencies = [
     # MD4 and RC4, which OpenSSL 3 no longer offers through hashlib
     "pycryptodome>=3.20.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/akhmialeuski/ed2k-client"
+Issues = "https://github.com/akhmialeuski/ed2k-client/issues"
+Changelog = "https://github.com/akhmialeuski/ed2k-client/blob/main/CHANGELOG.md"
 
 [project.scripts]
 ed2k-client = "ed2k_client.cli:main"
